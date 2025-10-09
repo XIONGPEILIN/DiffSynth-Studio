@@ -10,6 +10,15 @@ from accelerate.utils import DistributedDataParallelKwargs
 
 
 
+def _custom_collate(batch):
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+    keys = batch[0].keys()
+    collated_batch = {key: [d[key] for d in batch] for key in keys}
+    return collated_batch
+
+
 class ImageDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -529,6 +538,9 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
+    batch_size: int = 1,
+    wandb_project: str = None,
+    wandb_name: str = None,
     args = None,
 ):
     if args is not None:
@@ -539,21 +551,28 @@ def launch_training_task(
         num_epochs = args.num_epochs
         gradient_accumulation_steps = args.gradient_accumulation_steps
         find_unused_parameters = args.find_unused_parameters
+        batch_size = args.batch_size
+        wandb_project = args.wandb_project
+        wandb_name = args.wandb_name
     
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=_custom_collate, num_workers=num_workers, batch_size=batch_size)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
+        log_with="wandb" if wandb_project is not None else None,
     )
+    if wandb_project is not None:
+        accelerator.init_trackers(project_name=wandb_project, config=vars(args), init_kwargs={"wandb": {"name": wandb_name}})
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
     for epoch_id in range(num_epochs):
         for data in tqdm(dataloader):
+            if data is None: continue
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
-                if dataset.load_from_cache:
+                if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:
                     loss = model(data)
@@ -561,6 +580,8 @@ def launch_training_task(
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
+                if wandb_project is not None:
+                    accelerator.log({"loss": loss.item()})
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)
@@ -690,4 +711,7 @@ def qwen_image_parser():
     parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     parser.add_argument("--enable_fp8_training", default=False, action="store_true", help="Whether to enable FP8 training. Only available for LoRA training on a single GPU.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
+    parser.add_argument("--batch_size", type=int, default=1, help="Batch size.")
+    parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name.")
+    parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name.")
     return parser

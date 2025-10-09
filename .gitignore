@@ -1,0 +1,11 @@
+diffsynth.egg-info/
+*.egg
+*.pyc
+__pycache__/
+*.pyo
+models/
+wget-log
+Subjects200K/
+SemAlign-MS-Subjects200K/
+prepared_data_original/
+

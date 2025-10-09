@@ -36,7 +36,12 @@ class QwenImageBlockWiseControlNet(torch.nn.Module):
         dim: int = 3072,
     ):
         super().__init__()
-        self.img_in = nn.Linear(in_dim + additional_in_dim, dim)
+        self.in_dim = in_dim
+        self.additional_in_dim = additional_in_dim
+        if self.additional_in_dim > 0:
+            self.img_in = nn.Linear(in_dim, dim - self.additional_in_dim)
+        else:
+            self.img_in = nn.Linear(in_dim, dim)
         self.controlnet_blocks = nn.ModuleList(
             [
                 BlockWiseControlBlock(dim)
@@ -51,7 +56,12 @@ class QwenImageBlockWiseControlNet(torch.nn.Module):
             block.init_weights()
 
     def process_controlnet_conditioning(self, controlnet_conditioning):
-        return self.img_in(controlnet_conditioning)
+        if self.additional_in_dim > 0:
+            img_cond, mask_cond = torch.split(controlnet_conditioning, [self.in_dim, self.additional_in_dim], dim=-1)
+            img_cond = self.img_in(img_cond)
+            return torch.cat([img_cond, mask_cond], dim=-1)
+        else:
+            return self.img_in(controlnet_conditioning)
 
     def blockwise_forward(self, img, controlnet_conditioning, block_id):
         return self.controlnet_blocks[block_id](img, controlnet_conditioning)

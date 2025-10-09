@@ -70,5 +70,5 @@ class QwenImageBlockWiseControlNetStateDictConverter():
         extra_kwargs = {}
         if hash_value == "a9e54e480a628f0b956a688a81c33bab":
             # inpaint controlnet
-            extra_kwargs = {"additional_in_dim": 256}
+            extra_kwargs = {"additional_in_dim": 4}
         return state_dict, extra_kwargs

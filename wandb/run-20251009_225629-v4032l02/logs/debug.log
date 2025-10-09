@@ -1,0 +1,22 @@
+2025-10-09 22:56:29,707 INFO    MainThread:3006401 [wandb_setup.py:_flush():81] Current SDK version is 0.22.2
+2025-10-09 22:56:29,707 INFO    MainThread:3006401 [wandb_setup.py:_flush():81] Configure stats pid to 3006401
+2025-10-09 22:56:29,707 INFO    MainThread:3006401 [wandb_setup.py:_flush():81] Loading settings from /home2/y2024/s2430069/.config/wandb/settings
+2025-10-09 22:56:29,707 INFO    MainThread:3006401 [wandb_setup.py:_flush():81] Loading settings from /data/student/s2430069/DiffSynth-Studio/wandb/settings
+2025-10-09 22:56:29,708 INFO    MainThread:3006401 [wandb_setup.py:_flush():81] Loading settings from environment variables
+2025-10-09 22:56:29,708 INFO    MainThread:3006401 [wandb_init.py:setup_run_log_directory():705] Logging user logs to /data/student/s2430069/DiffSynth-Studio/wandb/run-20251009_225629-v4032l02/logs/debug.log
+2025-10-09 22:56:29,708 INFO    MainThread:3006401 [wandb_init.py:setup_run_log_directory():706] Logging internal logs to /data/student/s2430069/DiffSynth-Studio/wandb/run-20251009_225629-v4032l02/logs/debug-internal.log
+2025-10-09 22:56:29,709 INFO    MainThread:3006401 [wandb_init.py:init():832] calling init triggers
+2025-10-09 22:56:29,709 INFO    MainThread:3006401 [wandb_init.py:init():837] wandb.init called with sweep_config: {}
+config: {'_wandb': {}}
+2025-10-09 22:56:29,709 INFO    MainThread:3006401 [wandb_init.py:init():880] starting backend
+2025-10-09 22:56:29,960 INFO    MainThread:3006401 [wandb_init.py:init():883] sending inform_init request
+2025-10-09 22:56:29,982 INFO    MainThread:3006401 [wandb_init.py:init():891] backend started and connected
+2025-10-09 22:56:29,983 INFO    MainThread:3006401 [wandb_init.py:init():961] updated telemetry
+2025-10-09 22:56:30,050 INFO    MainThread:3006401 [wandb_init.py:init():985] communicating run to backend with 90.0 second timeout
+2025-10-09 22:56:30,821 INFO    MainThread:3006401 [wandb_init.py:init():1036] starting run threads in backend
+2025-10-09 22:56:31,970 INFO    MainThread:3006401 [wandb_run.py:_console_start():2509] atexit reg
+2025-10-09 22:56:31,971 INFO    MainThread:3006401 [wandb_run.py:_redirect():2357] redirect: wrap_raw
+2025-10-09 22:56:31,971 INFO    MainThread:3006401 [wandb_run.py:_redirect():2426] Wrapping output streams.
+2025-10-09 22:56:31,971 INFO    MainThread:3006401 [wandb_run.py:_redirect():2449] Redirects installed.
+2025-10-09 22:56:31,990 INFO    MainThread:3006401 [wandb_init.py:init():1076] run started, returning control to user process
+2025-10-09 22:56:31,991 INFO    MainThread:3006401 [wandb_run.py:_config_callback():1392] config_cb None None {'dataset_base_path': 'prepared_data_original', 'dataset_metadata_path': 'prepared_data_original/metadata.json', 'max_pixels': 1048576, 'height': 1024, 'width': 1024, 'data_file_keys': 'tgt_original_file,tgt_original_mask_file', 'dataset_repeat': 1, 'model_paths': None, 'model_id_with_origin_paths': 'Qwen/Qwen-Image-Edit-2509:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors,DiffSynth-Studio/Qwen-Image-Blockwise-ControlNet-Inpaint:model.safetensors', 'tokenizer_path': None, 'learning_rate': 0.0001, 'num_epochs': 5, 'output_path': 'train/Qwen-Image-Edit-2509_inpaint_controlnet_and_lora', 'remove_prefix_in_ckpt': 'pipe.dit.', 'trainable_models': 'blockwise_controlnet', 'lora_base_model': 'dit', 'lora_target_modules': 'to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1', 'lora_rank': 128, 'lora_checkpoint': None, 'extra_inputs': 'blockwise_controlnet_image,blockwise_controlnet_inpaint_mask', 'use_gradient_checkpointing': True, 'use_gradient_checkpointing_offload': False, 'gradient_accumulation_steps': 1, 'find_unused_parameters': True, 'save_steps': 1, 'dataset_num_workers': 8, 'weight_decay': 0.01, 'processor_path': None, 'enable_fp8_training': False, 'task': 'sft', 'batch_size': 1, 'wandb_project': 'qwen-image-inpaint', 'wandb_name': 'lora-rank128-lr1e4'}

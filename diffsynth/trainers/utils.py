@@ -568,7 +568,8 @@ def launch_training_task(
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}")
+        for data in pbar:
             if data is None: continue
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
@@ -582,6 +583,8 @@ def launch_training_task(
                 scheduler.step()
                 if wandb_project is not None:
                     accelerator.log({"loss": loss.item()})
+                # Update progress bar with loss
+                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
     model_logger.on_training_end(accelerator, model, save_steps)

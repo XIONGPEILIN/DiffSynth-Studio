@@ -29,20 +29,8 @@ class QwenImageBlockwiseMultiControlNet(torch.nn.Module):
     def preprocess(self, controlnet_inputs: list[ControlNetInput], conditionings: list[torch.Tensor], **kwargs):
         processed_conditionings = []
         for controlnet_input, conditioning in zip(controlnet_inputs, conditionings):
-            model = self.models[controlnet_input.controlnet_id]
-            if hasattr(model, "additional_in_dim") and model.additional_in_dim > 0:
-                img_c = 16
-                mask_c = conditioning.shape[1] - img_c
-                img_cond, mask_cond = torch.split(conditioning, [img_c, mask_c], dim=1)
-                
-                img_cond = rearrange(img_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
-                mask_cond = rearrange(mask_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
-
-                conditioning = torch.cat([img_cond, mask_cond], dim=-1)
-            else:
-                conditioning = rearrange(conditioning, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
-            
-            model_output = model.process_controlnet_conditioning(conditioning)
+            conditioning = rearrange(conditioning, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
+            model_output = self.models[controlnet_input.controlnet_id].process_controlnet_conditioning(conditioning)
             processed_conditionings.append(model_output)
         return processed_conditionings
 
@@ -351,32 +339,7 @@ class QwenImagePipeline(BasePipeline):
         pipe.text_encoder = model_manager.fetch_model("qwen_image_text_encoder")
         pipe.dit = model_manager.fetch_model("qwen_image_dit")
         pipe.vae = model_manager.fetch_model("qwen_image_vae")
-
-        # HACK: Manually set additional_in_dim for inpainting controlnet to fix size mismatch.
-        # The inpainting model requires 17 input channels (16 for latents + 1 for mask),
-        # which translates to an `additional_in_dim` of 4 in the model definition (17*4 - 16*4 = 4).
-        controlnet_model_args = {}
-        controlnet_config = None
-        for config in model_configs:
-            if "Qwen-Image-Blockwise-ControlNet-Inpaint" in config.model_id or "Qwen-Image-Blockwise-ControlNet" in config.model_id:
-                controlnet_model_args["additional_in_dim"] = 256
-                controlnet_config = config
-                break
-        
-        # Fetch controlnet models
-        controlnet_models = model_manager.fetch_model("qwen_image_blockwise_controlnet", index="all")
-        
-        # If controlnet not found in ModelManager, try to load manually from config
-        if controlnet_models is None and controlnet_config is not None:
-            from diffsynth.models.qwen_image_controlnet import QwenImageBlockWiseControlNet
-            import safetensors.torch
-            controlnet_model = QwenImageBlockWiseControlNet(**controlnet_model_args)
-            state_dict = safetensors.torch.load_file(controlnet_config.path)
-            controlnet_model.load_state_dict(state_dict)
-            controlnet_model = controlnet_model.to(device=device, dtype=torch_dtype)
-            controlnet_models = [controlnet_model]
-        
-        pipe.blockwise_controlnet = QwenImageBlockwiseMultiControlNet(controlnet_models) if controlnet_models else None
+        pipe.blockwise_controlnet = QwenImageBlockwiseMultiControlNet(model_manager.fetch_model("qwen_image_blockwise_controlnet", index="all"))
         if tokenizer_config is not None and pipe.text_encoder is not None:
             tokenizer_config.download_if_necessary()
             from transformers import Qwen2Tokenizer
@@ -716,22 +679,18 @@ class QwenImageUnit_BlockwiseControlNet(PipelineUnit):
         )
 
     def apply_controlnet_mask_on_latents(self, pipe, latents, mask):
-        from torchvision.transforms.functional import to_tensor
-        mask = mask.convert('L')
-        mask = to_tensor(mask).unsqueeze(0).to(device=latents.device, dtype=latents.dtype)
-        mask = 1 - mask
-        #[Batch, 1, 1024, 1024] -> [Batch, * , 128, 128]
-        mask = rearrange(mask, 'b c (h p1) (w p2) -> b (c p1 p2) h w', p1=8, p2=8)
+        mask = (pipe.preprocess_image(mask) + 1) / 2
+        mask = mask.mean(dim=1, keepdim=True)
+        mask = 1 - torch.nn.functional.interpolate(mask, size=latents.shape[-2:])
         latents = torch.concat([latents, mask], dim=1)
         return latents
 
     def apply_controlnet_mask_on_image(self, pipe, image, mask):
-        # Use NEAREST resampling to preserve sharp edges of the mask.
-        mask = mask.resize(image.size, resample=Image.Resampling.NEAREST).convert("L")
-        image_np = np.array(image)
-        mask_np = np.array(mask)
-        image_np[mask_np > 127] = 0
-        image = Image.fromarray(image_np)
+        mask = mask.resize(image.size)
+        mask = pipe.preprocess_image(mask).mean(dim=[0, 1]).cpu()
+        image = np.array(image)
+        image[mask > 0] = 0
+        image = Image.fromarray(image)
         return image
 
     def process(self, pipe: QwenImagePipeline, blockwise_controlnet_inputs: list[ControlNetInput], tiled, tile_size, tile_stride):

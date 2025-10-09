@@ -1,0 +1,21 @@
+accelerate launch examples/qwen_image/model_training/train2509.py \
+  --dataset_base_path "prepared_data_original" \
+  --dataset_metadata_path "prepared_data_original/metadata.json" \
+  --data_file_keys "tgt_original_file,tgt_original_mask_file" \
+  --height 1024 --width 1024 \
+  --dataset_repeat 1 \
+  --model_id_with_origin_paths "Qwen/Qwen-Image-Edit-2509:transformer/diffusion_pytorch_model*.safetensors,Qwen/Qwen-Image:text_encoder/model*.safetensors,Qwen/Qwen-Image:vae/diffusion_pytorch_model.safetensors,DiffSynth-Studio/Qwen-Image-Blockwise-ControlNet-Inpaint:model.safetensors" \
+  --learning_rate 1e-4 \
+  --num_epochs 5 \
+  --save_steps 3000 \
+  --trainable_models "blockwise_controlnet" \
+  --output_path "train/Qwen-Image-Edit-2509_inpaint_controlnet_and_lora" \
+  --lora_base_model "dit" \
+  --lora_target_modules "to_q,to_k,to_v,add_q_proj,add_k_proj,add_v_proj,to_out.0,to_add_out,img_mlp.net.2,img_mod.1,txt_mlp.net.2,txt_mod.1" \
+  --lora_rank 128 \
+  --extra_inputs "blockwise_controlnet_image,blockwise_controlnet_inpaint_mask" \
+  --use_gradient_checkpointing \
+  --find_unused_parameters \
+  --dataset_num_workers 8 \
+  --wandb_project "qwen-image-inpaint" \
+  --wandb_name "lora-rank128-lr1e4"

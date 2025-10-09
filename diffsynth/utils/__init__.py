@@ -1,7 +1,7 @@
 import torch, warnings, glob, os
 import numpy as np
 from PIL import Image
-from einops import repeat, reduce
+from einops import repeat, reduce, rearrange
 from typing import Optional, Union
 from dataclasses import dataclass
 from modelscope import snapshot_download
@@ -59,7 +59,43 @@ class BasePipeline(torch.nn.Module):
 
     def preprocess_image(self, image, torch_dtype=None, device=None, pattern="B C H W", min_value=-1, max_value=1):
         # Transform a PIL.Image to torch.Tensor
-        image = torch.Tensor(np.array(image, dtype=np.float32))
+        # Handle list of images (for batch processing)
+        if isinstance(image, list):
+            # Process each image in the list and stack
+            processed_images = []
+            for img in image:
+                processed_img = self.preprocess_image(img, torch_dtype, device, "C H W" if "B" in pattern else pattern, min_value, max_value)
+                processed_images.append(processed_img)
+            # Stack into batch
+            if "B" in pattern:
+                return torch.stack(processed_images, dim=0)
+            else:
+                return processed_images[0] if len(processed_images) == 1 else processed_images
+        
+        if isinstance(image, torch.Tensor):
+            # If already tensor, check dimensions
+            if image.dim() == 4:
+                # Already in B H W C format, convert to target pattern directly
+                batch_size = image.shape[0]
+                image = image.to(dtype=torch_dtype or self.torch_dtype, device=device or self.device)
+                image = image * ((max_value - min_value) / 255) + min_value
+                # Rearrange from B H W C to target pattern
+                if pattern == "B C H W":
+                    image = rearrange(image, "B H W C -> B C H W")
+                elif pattern == "C H W":
+                    # Take first image from batch
+                    image = rearrange(image[0], "H W C -> C H W")
+                else:
+                    image = rearrange(image, f"B H W C -> {pattern}", B=batch_size)
+                return image
+            elif image.dim() == 3:
+                pass  # H W C, continue normal processing below
+            else:
+                raise ValueError(f"Unexpected tensor dimensions: {image.shape}")
+        else:
+            image = torch.Tensor(np.array(image, dtype=np.float32))
+        
+        # Normal processing for PIL.Image or 3D tensor (H W C)
         image = image.to(dtype=torch_dtype or self.torch_dtype, device=device or self.device)
         image = image * ((max_value - min_value) / 255) + min_value
         image = repeat(image, f"H W C -> {pattern}", **({"B": 1} if "B" in pattern else {}))

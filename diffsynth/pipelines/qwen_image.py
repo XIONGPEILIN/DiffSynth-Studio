@@ -25,22 +25,23 @@ class QwenImageBlockwiseMultiControlNet(torch.nn.Module):
         if not isinstance(models, list):
             models = [models]
         self.models = torch.nn.ModuleList(models)
+        
 
     def preprocess(self, controlnet_inputs: list[ControlNetInput], conditionings: list[torch.Tensor], **kwargs):
         processed_conditionings = []
         for controlnet_input, conditioning in zip(controlnet_inputs, conditionings):
             model = self.models[controlnet_input.controlnet_id]
-            if hasattr(model, "additional_in_dim") and model.additional_in_dim > 0:
-                img_c = 16
-                mask_c = conditioning.shape[1] - img_c
-                img_cond, mask_cond = torch.split(conditioning, [img_c, mask_c], dim=1)
-                
-                img_cond = rearrange(img_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
-                mask_cond = rearrange(mask_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
+        # if hasattr(model, "additional_in_dim") and model.additional_in_dim > 0:
+            img_c = 16
+            mask_c = conditioning.shape[1] - img_c
+            img_cond, mask_cond = torch.split(conditioning, [img_c, mask_c], dim=1)
+            
+            img_cond = rearrange(img_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
+            mask_cond = rearrange(mask_cond, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
 
-                conditioning = torch.cat([img_cond, mask_cond], dim=-1)
-            else:
-                conditioning = rearrange(conditioning, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
+            conditioning = torch.cat([img_cond, mask_cond], dim=-1)
+        # else:
+        #     conditioning = rearrange(conditioning, "B C (H P) (W Q) -> B (H W) (C P Q)", P=2, Q=2)
             
             model_output = model.process_controlnet_conditioning(conditioning)
             processed_conditionings.append(model_output)
@@ -726,12 +727,11 @@ class QwenImageUnit_BlockwiseControlNet(PipelineUnit):
         return latents
 
     def apply_controlnet_mask_on_image(self, pipe, image, mask):
-        # Use NEAREST resampling to preserve sharp edges of the mask.
-        mask = mask.resize(image.size, resample=Image.Resampling.NEAREST).convert("L")
-        image_np = np.array(image)
-        mask_np = np.array(mask)
-        image_np[mask_np > 127] = 0
-        image = Image.fromarray(image_np)
+        mask = mask.resize(image.size)
+        mask = pipe.preprocess_image(mask).mean(dim=[0, 1]).cpu()
+        image = np.array(image)
+        image[mask > 0] = 0
+        image = Image.fromarray(image)
         return image
 
     def process(self, pipe: QwenImagePipeline, blockwise_controlnet_inputs: list[ControlNetInput], tiled, tile_size, tile_stride):

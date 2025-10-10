@@ -538,7 +538,6 @@ def launch_training_task(
     num_epochs: int = 1,
     gradient_accumulation_steps: int = 1,
     find_unused_parameters: bool = False,
-    batch_size: int = 1,
     wandb_project: str = None,
     wandb_name: str = None,
     args = None,
@@ -551,13 +550,12 @@ def launch_training_task(
         num_epochs = args.num_epochs
         gradient_accumulation_steps = args.gradient_accumulation_steps
         find_unused_parameters = args.find_unused_parameters
-        batch_size = args.batch_size
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
     
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=_custom_collate, num_workers=num_workers, batch_size=batch_size)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
@@ -714,7 +712,6 @@ def qwen_image_parser():
     parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     parser.add_argument("--enable_fp8_training", default=False, action="store_true", help="Whether to enable FP8 training. Only available for LoRA training on a single GPU.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size.")
     parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name.")
     parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name.")
     return parser

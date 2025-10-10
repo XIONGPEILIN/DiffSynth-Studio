@@ -52,8 +52,8 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
             # Assume you are using this pipeline for inference,
             # please fill in the input parameters.
             "input_image": data["image"],
-            "height": data["image"][0].size[1],
-            "width": data["image"][0].size[0],
+            "height": data["image"].size[1],
+            "width": data["image"].size[0],
             # Please do not modify the following parameters
             # unless you clearly know what this will cause.
             "cfg_scale": 1,

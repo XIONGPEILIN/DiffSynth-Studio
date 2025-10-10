@@ -79,7 +79,7 @@ def process_single_sample(args):
     """处理单个样本的函数（用于多进程）"""
     (idx, custom_dataset, output_dirs) = args
     
-    tgt_original_dir, ref_dir = output_dirs
+    tgt_original_dir, tgt_clean_dir, ref_dir = output_dirs
     to_pil_image = transforms.ToPILImage()
     collate_fn = make_collate_fn_w_coord(num_refs=1)
     
@@ -125,6 +125,9 @@ def process_single_sample(args):
             print(f"\n样本 {idx} (ID: {sample_id}) 没有原始mask,跳过处理")
             return None
         
+        # === 保存原始 target 图像 ===
+        tgt_img_pil.save(os.path.join(tgt_clean_dir, f"{sample_id}.png"))
+        
         # === 处理 target 图像并获取扩张后的 mask ===
         tgt_processed, tgt_dilated_mask = process_mask_and_image(tgt_img_pil, original_mask_pil)
         tgt_processed.save(os.path.join(tgt_original_dir, f"{sample_id}.png"))
@@ -140,6 +143,7 @@ def process_single_sample(args):
             "ref_file": f"{sample_id}.png",
             "ref_mask_file": None,  # 不保存ref mask
             "ref_mask_type": None,  # 不保存ref mask
+            "tgt_clean_file": f"{sample_id}.png",  # 原始tgt图片
             "tgt_original_file": f"{sample_id}.png",
             "tgt_original_mask_file": f"{sample_id}_mask.png",
         }
@@ -203,12 +207,15 @@ def prepare_dataset(
     """
     # 创建输出目录
     tgt_original_dir = os.path.join(output_dir, "tgt_original")
+    tgt_clean_dir = os.path.join(output_dir, "tgt_clean")  # 保存原始tgt图片
     ref_dir = os.path.join(output_dir, "ref")
     os.makedirs(tgt_original_dir, exist_ok=True)
+    os.makedirs(tgt_clean_dir, exist_ok=True)
     os.makedirs(ref_dir, exist_ok=True)
     
     print(f"输出目录:")
     print(f"  - tgt_original: {tgt_original_dir}")
+    print(f"  - tgt_clean: {tgt_clean_dir}")
     print(f"  - ref: {ref_dir}")
     
     # 创建临时数据集以获取总样本数
@@ -249,7 +256,7 @@ def prepare_dataset(
     print(f"准备使用 {num_workers} 个CPU线程处理 {total_samples} 个样本...")
 
     # 准备进程池参数
-    output_dirs = (tgt_original_dir, ref_dir)
+    output_dirs = (tgt_original_dir, tgt_clean_dir, ref_dir)
     worker_args = [(idx, output_dirs) for idx in indices_to_process]
     dataset_args = (dataset, ref_size, tgt_size, grounding_zip, coord_zip)
 
@@ -275,8 +282,9 @@ def prepare_dataset(
     print(f"\n✅ 数据准备完成!")
     print(f"  - 成功处理: {len(metadata)} 个样本")
     print(f"  - Metadata 保存至: {metadata_path}")
-    print(f"  - Target (原始 mask) 图像保存至: {tgt_original_dir}")
-    print(f"  - Ref 图像和 mask 保存至: {ref_dir}")
+    print(f"  - Target (原始未处理) 图像保存至: {tgt_clean_dir}")
+    print(f"  - Target (处理后) 图像保存至: {tgt_original_dir}")
+    print(f"  - Ref 图像保存至: {ref_dir}")
 
 
 if __name__ == "__main__":

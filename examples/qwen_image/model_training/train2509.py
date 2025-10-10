@@ -44,18 +44,6 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
 
     
     def forward_preprocess(self, data):
-        # Map dataset keys to the keys expected by the pipeline
-        key_mapping = {
-            "image": "tgt_original_file",
-            "blockwise_controlnet_image": "tgt_original_file",
-            "blockwise_controlnet_inpaint_mask": "tgt_original_mask_file",
-        }
-        mapped_data = data.copy()
-        for target_key, source_key in key_mapping.items():
-            if source_key in data:
-                mapped_data[target_key] = data[source_key]
-        data = mapped_data
-
         # CFG-sensitive parameters
         inputs_posi = {"prompt": data["prompt"]}
         inputs_nega = {"negative_prompt": [""] * len(data["prompt"])}
@@ -85,24 +73,10 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
                 controlnet_input[extra_input.replace("controlnet_", "")] = data[extra_input]
             else:
                 inputs_shared[extra_input] = data[extra_input]
-        
-        # 为批处理创建多个 ControlNetInput（每个样本一个）
-        batch_size = len(data["prompt"])
         if len(controlnet_input) > 0:
-            # 创建 batch_size 个 ControlNetInput
-            controlnet_inputs_list = []
-            for i in range(batch_size):
-                single_input = {k: (v[i] if isinstance(v, list) else v) for k, v in controlnet_input.items()}
-                controlnet_inputs_list.append(ControlNetInput(**single_input))
-            inputs_shared["controlnet_inputs"] = controlnet_inputs_list
-        
+            inputs_shared["controlnet_inputs"] = [ControlNetInput(**controlnet_input)]
         if len(blockwise_controlnet_input) > 0:
-            # 创建 batch_size 个 ControlNetInput
-            blockwise_controlnet_inputs_list = []
-            for i in range(batch_size):
-                single_input = {k: (v[i] if isinstance(v, list) else v) for k, v in blockwise_controlnet_input.items()}
-                blockwise_controlnet_inputs_list.append(ControlNetInput(**single_input))
-            inputs_shared["blockwise_controlnet_inputs"] = blockwise_controlnet_inputs_list
+            inputs_shared["blockwise_controlnet_inputs"] = [ControlNetInput(**blockwise_controlnet_input)]
         
         # Pipeline units will automatically process the input parameters.
         for unit in self.pipe.units:
@@ -172,49 +146,3 @@ if __name__ == "__main__":
         "direct_distill": launch_training_task,
     }
     launcher_map[args.task](dataset, model, model_logger, args=args)
-
-
-
-
-
-
-
-
-# json：
-# [
-#   {
-#     "id": "0000749a25d7882bad58e6a34200804db1da5a5ff704abf96b96f17688c03f4d",
-#     "prompt": "At the foot of a rainforest trail under heavy overcast skies, it rests on dewy leaves, with towering green foliage all around.",
-#     "ref_file": "0000749a25d7882bad58e6a34200804db1da5a5ff704abf96b96f17688c03f4d.png",
-#     "ref_mask_file": null,
-#     "ref_mask_type": null,
-#     "tgt_original_file": "0000749a25d7882bad58e6a34200804db1da5a5ff704abf96b96f17688c03f4d.png",
-#     "tgt_original_mask_file": "0000749a25d7882bad58e6a34200804db1da5a5ff704abf96b96f17688c03f4d_mask.png"
-#   },
-#   {
-#     "id": "0000e237dc054cf71bcdfe31bde068483aa3cb074e178ef5f4a685763d48e2e7",
-#     "prompt": "During a rainy afternoon indoors, it rests coiled by the entrance, with droplets visible on a nearby window, overlooking a street where people hurriedly walk with umbrellas.",
-#     "ref_file": "0000e237dc054cf71bcdfe31bde068483aa3cb074e178ef5f4a685763d48e2e7.png",
-#     "ref_mask_file": null,
-#     "ref_mask_type": null,
-#     "tgt_original_file": "0000e237dc054cf71bcdfe31bde068483aa3cb074e178ef5f4a685763d48e2e7.png",
-#     "tgt_original_mask_file": "0000e237dc054cf71bcdfe31bde068483aa3cb074e178ef5f4a685763d48e2e7_mask.png"
-#   },
-#   {
-#     "id": "00011c7fd1b57974053345938d1b9867b543d04eacb3fb3c872df02c622bda28",
-#     "prompt": "Inside a kitchen, placed next to a mixing bowl, it is shot from above under warm artificial lighting, with baking supplies scattered around on the countertop.",
-#     "ref_file": "00011c7fd1b57974053345938d1b9867b543d04eacb3fb3c872df02c622bda28.png",
-#     "ref_mask_file": null,
-#     "ref_mask_type": null,
-#     "tgt_original_file": "00011c7fd1b57974053345938d1b9867b543d04eacb3fb3c872df02c622bda28.png",
-#     "tgt_original_mask_file": "00011c7fd1b57974053345938d1b9867b543d04eacb3fb3c872df02c622bda28_mask.png"
-#   },
-#   {
-#     "id": "00016896889fc32eacb48fe488834f1d51dcc23bda000a36fbe1fbbc63ecd114",
-#     "prompt": "It waits on a suburban sidewalk, seen in profile with cloudy skies looming large, leaves swirling gently in the autumn breeze around it.",
-#     "ref_file": "00016896889fc32eacb48fe488834f1d51dcc23bda000a36fbe1fbbc63ecd114.png",
-#     "ref_mask_file": null,
-#     "ref_mask_type": null,
-#     "tgt_original_file": "00016896889fc32eacb48fe488834f1d51dcc23bda000a36fbe1fbbc63ecd114.png",
-#     "tgt_original_mask_file": "00016896889fc32eacb48fe488834f1d51dcc23bda000a36fbe1fbbc63ecd114_mask.png"
-#   },

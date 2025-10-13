@@ -353,9 +353,6 @@ class QwenImagePipeline(BasePipeline):
         pipe.dit = model_manager.fetch_model("qwen_image_dit")
         pipe.vae = model_manager.fetch_model("qwen_image_vae")
 
-        # HACK: Manually set additional_in_dim for inpainting controlnet to fix size mismatch.
-        # The inpainting model requires 17 input channels (16 for latents + 1 for mask),
-        # which translates to an `additional_in_dim` of 4 in the model definition (17*4 - 16*4 = 4).
         controlnet_model_args = {}
         controlnet_config = None
         for config in model_configs:

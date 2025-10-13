@@ -554,6 +554,10 @@ def launch_training_task(
         wandb_name = args.wandb_name
     
     optimizer = torch.optim.AdamW(model.trainable_modules(), lr=learning_rate, weight_decay=weight_decay)
+    print(f"Number of trainable parameters: {len(list(model.trainable_modules()))}")
+    print(f"Number of total parameters: {len(list(model.parameters()))}")
+    print(f"Trainable parameter ratio: {len(list(model.trainable_modules())) / len(list(model.parameters())):.2%}")
+    print(f"Trainable parameter names: {model.trainable_param_names()}")
     scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     accelerator = Accelerator(

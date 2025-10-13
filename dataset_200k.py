@@ -1,10 +1,10 @@
 """
-数据集准备脚本：
-1. 从 view_dataset.py 加载数据
-2. 将 target 图像的 mask 区域标记为蓝色
-3. 使用 FLUX.1-Kontext 消除蓝色区域
-4. 保存处理后的数据到指定文件夹
-支持多GPU并行处理和多机分布式处理
+数据集准备脚本 (适用于图像修复/Inpainting任务):
+1. 从 Subjects200K 数据集加载数据。
+2. 在目标图像(target)的掩码(mask)区域内填充随机颜色，生成"损坏"的图像。
+3. 对原始掩码进行扩张(dilation)，生成一个用于修复区域提示的扩张后掩码。
+4. 保存原始目标图像、"损坏"的目标图像、引用图像(reference)以及扩张后的掩码。
+5. 支持多CPU核心并行处理和多机分布式处理。
 """
 
 import os
@@ -27,13 +27,15 @@ from view_dataset import Subjects200K, make_collate_fn_w_coord
 
 def process_mask_and_image(image_pil, mask_pil, dilation_kernel_size=64):
     """
-    用随机颜色填充mask区域，然后扩张填充后的区域，使得物体形状几乎看不出。
+    在图像的指定掩码(mask)区域填充随机颜色，并对掩码本身进行扩张。
     Args:
-        image_pil: PIL 图像
-        mask_pil: PIL mask 图像
-        dilation_kernel_size: 扩张操作的核大小
+        image_pil: 原始PIL图像。
+        mask_pil: 原始PIL mask图像。
+        dilation_kernel_size: 用于扩张掩码的核大小。
     Returns:
-        处理后的 PIL 图像, 扩张后的 PIL mask
+        tuple: 包含两个元素的元组:
+            - result_image (PIL.Image): 在原始掩码区域填充了随机颜色的新图像。
+            - dilated_mask_pil (PIL.Image): 被扩张处理后的掩码图像。
     """
     if image_pil.mode != 'RGB':
         image_pil = image_pil.convert('RGB')
@@ -49,23 +51,16 @@ def process_mask_and_image(image_pil, mask_pil, dilation_kernel_size=64):
     # 定义扩张核
     kernel = np.ones((dilation_kernel_size, dilation_kernel_size), np.uint8)
 
-    # 1. 先用随机颜色填充原始mask区域
+    # 1. 准备用于填充的随机颜色
     is_foreground = mask_array > 128
-    color_filled_image = image_array.copy()
-    # 使用更均匀的随机颜色生成（避免过多极值）
-    # 方法1: 使用均匀分布
+    # 使用均匀分布生成随机颜色
     random_colors = np.random.randint(0, 256, size=image_array.shape, dtype=np.uint8)
-    # 方法2: 使用更温和的高斯噪声（如果想要更自然的变化）
-    # noise = np.random.normal(loc=128, scale=50, size=image_array.shape)  
-    # random_colors = np.clip(noise, 0, 255).astype(np.uint8)
-    color_filled_image[is_foreground] = random_colors[is_foreground]
 
     # 2. 扩张mask区域（用于标记需要处理的区域）
     dilated_mask_array = cv2.dilate(mask_array, kernel, iterations=1)
     
-    # 3. 只在原始mask区域填充随机颜色，扩张区域保持原图
+    # 3. 在新图像的原始mask区域填充随机颜色
     final_image_array = image_array.copy()
-    # 仅在原始mask区域填充随机颜色
     final_image_array[is_foreground] = random_colors[is_foreground]
     # 扩张区域保持原图不变（不填充噪声）
     
@@ -126,15 +121,15 @@ def process_single_sample(args):
             return None
         
         # === 保存原始 target 图像 ===
-        tgt_img_pil.save(os.path.join(tgt_clean_dir, f"{sample_id}.png"))
+        tgt_img_pil.save(os.path.join(tgt_clean_dir, f"{sample_id}.png"), compress_level=1)
         
         # === 处理 target 图像并获取扩张后的 mask ===
         tgt_processed, tgt_dilated_mask = process_mask_and_image(tgt_img_pil, original_mask_pil)
-        tgt_processed.save(os.path.join(tgt_original_dir, f"{sample_id}.png"))
-        tgt_dilated_mask.save(os.path.join(tgt_original_dir, f"{sample_id}_mask.png"))
+        tgt_processed.save(os.path.join(tgt_original_dir, f"{sample_id}.png"), compress_level=1)
+        tgt_dilated_mask.save(os.path.join(tgt_original_dir, f"{sample_id}_mask.png"), compress_level=1)
         
         # === 保存 ref 图像（不保存 mask） ===
-        ref_img_pil.save(os.path.join(ref_dir, f"{sample_id}.png"))
+        ref_img_pil.save(os.path.join(ref_dir, f"{sample_id}.png"), compress_level=1)
         
         # 记录 metadata
         metadata_entry = {
@@ -192,7 +187,7 @@ def prepare_dataset(
     coord_zip=None
 ):
     """
-    准备数据集 - 使用多GPU并行处理，使用数据集原本的mask
+    准备数据集 - 使用多CPU核心并行处理，使用数据集原本的mask。
     Args:
         dataset: 原始数据集
         output_dir: 输出目录
@@ -234,24 +229,26 @@ def prepare_dataset(
     
     # 确定处理样本数量和范围
     dataset_size = len(temp_dataset)
-    
-    # 优先使用 start_idx/end_idx，其次使用 num_samples
+    all_indices = list(range(dataset_size))
+    indices_to_process = []
+
+    # 优先使用 start_idx/end_idx (分布式处理)，其次使用 num_samples (随机抽样)，最后处理全部
     if start_idx is not None or end_idx is not None:
         actual_start = start_idx if start_idx is not None else 0
         actual_end = end_idx if end_idx is not None else dataset_size
         actual_start = max(0, min(actual_start, dataset_size))
         actual_end = max(actual_start, min(actual_end, dataset_size))
-        print(f"\n本机处理范围: [{actual_start}, {actual_end}), 共 {actual_end - actual_start} 个样本")
+        indices_to_process = all_indices[actual_start:actual_end]
+        print(f"\n本机处理范围: [{actual_start}, {actual_end}), 共 {len(indices_to_process)} 个样本")
     elif num_samples is not None:
-        actual_start = 0
-        actual_end = min(num_samples, dataset_size)
-        print(f"\n处理前 {actual_end} 个样本")
+        num_to_sample = min(num_samples, dataset_size)
+        random.seed(42) # 固定随机种子以保证抽样结果可复现
+        indices_to_process = random.sample(all_indices, num_to_sample)
+        print(f"\n从数据集中随机抽取 {len(indices_to_process)} 个样本进行处理")
     else:
-        actual_start = 0
-        actual_end = dataset_size
-        print(f"\n处理全部 {actual_end} 个样本")
+        indices_to_process = all_indices
+        print(f"\n处理全部 {len(indices_to_process)} 个样本")
     
-    indices_to_process = list(range(actual_start, actual_end))
     total_samples = len(indices_to_process)
     print(f"准备使用 {num_workers} 个CPU线程处理 {total_samples} 个样本...")
 
@@ -269,9 +266,8 @@ def prepare_dataset(
                     metadata.append(result)
                 pbar.update(1)
 
-    # 按ID排序metadata以保证顺序
+    # 按ID排序metadata以保证顺序，这对于可复现的数据集至关重要
     if metadata:
-        # 假设ID可以被转换成数字进行排序
         metadata.sort(key=lambda x: x['id'])
 
     # 保存 metadata 到 JSON
@@ -295,7 +291,7 @@ if __name__ == "__main__":
     OUTPUT_DIR = "prepared_data_original"
     
     # ==================== 单机模式 ====================
-    NUM_SAMPLES = None  # 处理全部样本
+    NUM_SAMPLES = 2000  # 设置为随机抽取2000个样本
     START_IDX = None    # 从头开始
     END_IDX = None      # 处理到最后
     NUM_WORKERS = 64    # 使用64个CPU线程
@@ -354,8 +350,8 @@ if __name__ == "__main__":
         start_idx=START_IDX,
         end_idx=END_IDX,
         num_workers=NUM_WORKERS,
-        ref_size=1024,
-        tgt_size=1024,
+        ref_size=512,
+        tgt_size=512,
         grounding_zip=GROUNDING_ZIP,
         coord_zip=COORD_ZIP
     )

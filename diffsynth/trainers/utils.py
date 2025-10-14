@@ -10,13 +10,6 @@ from accelerate.utils import DistributedDataParallelKwargs
 
 
 
-def _custom_collate(batch):
-    batch = [b for b in batch if b is not None]
-    if not batch:
-        return None
-    keys = batch[0].keys()
-    collated_batch = {key: [d[key] for d in batch] for key in keys}
-    return collated_batch
 
 
 class ImageDataset(torch.utils.data.Dataset):

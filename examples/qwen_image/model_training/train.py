@@ -45,7 +45,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
     def forward_preprocess(self, data):
         # CFG-sensitive parameters
         inputs_posi = {"prompt": data["prompt"]}
-        inputs_nega = {"negative_prompt": [""] * len(data["prompt"])}
+        inputs_nega = {"negative_prompt": ""}
         
         # CFG-unsensitive parameters
         inputs_shared = {

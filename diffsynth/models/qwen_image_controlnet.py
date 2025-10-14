@@ -66,5 +66,9 @@ class QwenImageBlockWiseControlNetStateDictConverter():
         pass
 
     def from_civitai(self, state_dict):
-        extra_kwargs = {"additional_in_dim": 256}
+        hash_value = hash_state_dict_keys(state_dict)
+        extra_kwargs = {}
+        if hash_value == "a9e54e480a628f0b956a688a81c33bab":
+            # inpaint controlnet
+            extra_kwargs = {"additional_in_dim": 4}
         return state_dict, extra_kwargs

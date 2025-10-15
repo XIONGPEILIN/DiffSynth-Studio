@@ -1,6 +1,6 @@
 accelerate launch examples/qwen_image/model_training/train.py \
   --dataset_base_path "prepared_data_original" \
-  --dataset_metadata_path "prepared_data_original/metadata.json" \
+  --dataset_metadata_path "prepared_data_original/metashadow.json" \
   --data_file_keys "image,edit_image" \
   --height 512 --width 512 \
   --dataset_repeat 1 \

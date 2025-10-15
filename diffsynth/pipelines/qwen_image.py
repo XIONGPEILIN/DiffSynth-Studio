@@ -107,12 +107,16 @@ class QwenImagePipeline(BasePipeline):
             
             
     def clear_lora(self):
-        for name, module in self.named_modules():
-            if isinstance(module, AutoWrappedLinear): 
-                if hasattr(module, "lora_A_weights"):
-                    module.lora_A_weights.clear()
-                if hasattr(module, "lora_B_weights"):
-                    module.lora_B_weights.clear()
+        # Clear LoRA from all models in the pipeline
+        models_to_clear = [self.dit, self.text_encoder, self.vae, self.blockwise_controlnet]
+        for model in models_to_clear:
+            if model is not None:
+                for name, module in model.named_modules():
+                    if isinstance(module, AutoWrappedLinear): 
+                        if hasattr(module, "lora_A_weights"):
+                            module.lora_A_weights.clear()
+                        if hasattr(module, "lora_B_weights"):
+                            module.lora_B_weights.clear()
                     
     
     def enable_lora_magic(self):
@@ -571,6 +575,9 @@ class QwenImageUnit_PromptEmbedder(PipelineUnit):
         split_hidden_states = self.extract_masked_hidden(hidden_states, model_inputs.attention_mask)
         split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
         return split_hidden_states
+
+
+
 
     def process(self, pipe: QwenImagePipeline, prompt, edit_image=None) -> dict:
         if pipe.text_encoder is not None:

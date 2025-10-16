@@ -59,10 +59,42 @@ class FlowMatchScheduler():
             self.sigmas = 1 - self.sigmas
         self.timesteps = self.sigmas * self.num_train_timesteps
         if training:
+            # --- 开始修改 ---
+            
             x = self.timesteps
-            y = torch.exp(-2 * ((x - num_inference_steps / 2) / num_inference_steps) ** 2)
+
+            # 1. 计算原始的、以中点为中心的钟形曲线 (第一个峰)
+            y_mid = torch.exp(-2 * ((x - num_inference_steps / 2) / num_inference_steps) ** 2)
+
+            # 2. 定义并计算新的高噪声区域的尖峰 (第二个峰)
+            
+            # --- 您可以在这里调整这些超参数 ---
+            # 峰值的位置 (0.0 to 1.0, 0.85 代表在 85% 的 timestep 处)
+            high_noise_peak_pos = 0.85 
+            # 峰值的“胖瘦”/宽度 (数值越小，峰越尖锐)
+            high_noise_peak_width = 0.03 
+            # 峰值的“高度”/强度 (相对于第一个峰的高度)
+            high_noise_peak_scale = 0.02   
+            # ------------------------------------
+
+            # 将相对位置和宽度转换为绝对时间步
+            center_timestep = num_inference_steps * high_noise_peak_pos
+            width_timesteps = num_inference_steps * high_noise_peak_width + 1e-8 # 防止除以零
+
+            # 计算第二个高斯峰
+            y_high = high_noise_peak_scale * torch.exp(-0.5 * ((x - center_timestep) / width_timesteps) ** 2)
+
+            # 3. 将两个峰的权重相加，形成双峰曲线
+            y = y_mid + y_high
+
+            # --- 修改结束 ---
+
+            # 4. 后续的归一化处理保持不变
             y_shifted = y - y.min()
-            bsmntw_weighing = y_shifted * (num_inference_steps / y_shifted.sum())
+            
+            epsilon = 1e-8
+            bsmntw_weighing = y_shifted * (num_inference_steps / (y_shifted.sum() + epsilon))
+            
             self.linear_timesteps_weights = bsmntw_weighing
             self.training = True
         else:
@@ -107,36 +139,9 @@ class FlowMatchScheduler():
 
 
     def training_weight(self, timestep):
-        t_tensor = torch.tensor([timestep])
-        
-        # 获取 sigma (加噪强度)
-        timestep_device = t_tensor.to(timestep.device)
-        timestep_id = torch.argmin((timestep - timestep_device).abs())
-        sigma = self.sigmas[timestep_id]
-        
-        # 原权重: 只有高斯中噪声权重 (旧代码的实现)
-        old_weight = self.linear_timesteps_weights[timestep_id]
-
-        # 新权重: 双峰分布 (原高斯峰 + 基于SNR的峰)
-        snr = ((1 - sigma) / (sigma + 1e-8)) ** 2
-        
-        # 峰1: 保留原始高斯峰
-        gaussian_peak = old_weight
-        
-        # 峰2: 基于 SNR 的峰 (用于增强光影学习)
-        log_snr = torch.log(snr + 1e-8)
-        log_snr_center = 0      # SNR峰中心位置 (对应低timestep区域)
-        log_snr_std = 1         # SNR峰宽度
-        snr_peak_strength = 2  # SNR峰强度系数
-        
-        # 计算基于 SNR 的高斯峰
-        distance_from_center = torch.abs(log_snr - log_snr_center)
-        snr_peak = snr_peak_strength * torch.exp(-0.5 * (distance_from_center / log_snr_std) ** 2)
-        
-        # 组合双峰: 原高斯峰 + SNR峰
-        new_weight = gaussian_peak + snr_peak
-        print(f"Timestep: {timestep}, Sigma: {sigma:.4f}, Old Weight: {old_weight:.4f}, New Weight: {new_weight:.4f}")
-        return new_weight
+        timestep_id = torch.argmin((self.timesteps - timestep.to(self.timesteps.device)).abs())
+        weights = self.linear_timesteps_weights[timestep_id]
+        return weights
     
     
     def calculate_shift(

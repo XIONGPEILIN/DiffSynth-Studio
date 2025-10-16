@@ -110,12 +110,20 @@ class FlowMatchScheduler():
         # 使用 log(SNR)^2 使权重在低噪声区域更加集中，下降更快
         
         # --- 精确查找 timestep 对应的 sigma ---
-        timestep_device = timestep.to(self.timesteps.device)
-        # 处理批量 timestep 的情况
-        if timestep.dim() == 0:
-            timestep_id = torch.argmin((self.timesteps - timestep_device).abs())
+        # 保存原始设备，用于最后返回
+        original_device = timestep.device
+        
+        # 将 timestep 移到 CPU 进行索引查找（与其他方法保持一致）
+        if isinstance(timestep, torch.Tensor):
+            timestep_cpu = timestep.cpu()
         else:
-            timestep_id = torch.argmin((self.timesteps.unsqueeze(0) - timestep_device.unsqueeze(1)).abs(), dim=1)
+            timestep_cpu = timestep
+            
+        # 处理批量 timestep 的情况
+        if timestep_cpu.dim() == 0:
+            timestep_id = torch.argmin((self.timesteps - timestep_cpu).abs())
+        else:
+            timestep_id = torch.argmin((self.timesteps.unsqueeze(0) - timestep_cpu.unsqueeze(1)).abs(), dim=1)
         
         # 获取精确的 sigma 值
         sigma = self.sigmas[timestep_id]
@@ -128,8 +136,12 @@ class FlowMatchScheduler():
         log_snr = torch.log(snr + 1e-8)
         weights = torch.clamp(log_snr, min=0) ** 2  # 使用平方使下降更陡峭
         
-        # 归一化权重，避免数值过大
-        weights = weights / (weights.mean() + 1e-8)
+        # 归一化权重，控制最大值在 7 左右（与原权重量级一致）
+        # 使用固定缩放因子，避免按均值归一化导致权重过大
+        weights = weights / 8.5  # 60.59 / 8.5 ≈ 7.13
+        
+        # 将权重移回原始设备
+        weights = weights.to(original_device)
         
         return weights
     

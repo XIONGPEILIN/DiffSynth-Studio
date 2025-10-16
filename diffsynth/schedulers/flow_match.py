@@ -69,12 +69,12 @@ class FlowMatchScheduler():
             # 2. 定义并计算新的高噪声区域的尖峰 (第二个峰)
             
             # --- 您可以在这里调整这些超参数 ---
-            # 峰值的位置 (0.0 to 1.0, 0.85 代表在 85% 的 timestep 处)
-            high_noise_peak_pos = 0.85 
+            # 峰值的位置 (0.0 to 1.0, 0.9 代表在 90% 的 timestep 处)
+            high_noise_peak_pos = 0.9
             # 峰值的“胖瘦”/宽度 (数值越小，峰越尖锐)
             high_noise_peak_width = 0.03 
             # 峰值的“高度”/强度 (相对于第一个峰的高度)
-            high_noise_peak_scale = 0.02   
+            high_noise_peak_scale = 0.2   
             # ------------------------------------
 
             # 将相对位置和宽度转换为绝对时间步

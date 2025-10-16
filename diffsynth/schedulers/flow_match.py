@@ -106,8 +106,31 @@ class FlowMatchScheduler():
     
 
     def training_weight(self, timestep):
-        timestep_id = torch.argmin((self.timesteps - timestep.to(self.timesteps.device)).abs())
-        weights = self.linear_timesteps_weights[timestep_id]
+        # 策略: 使用陡峭的低噪声权重，取消高斯中噪声权重
+        # 使用 log(SNR)^2 使权重在低噪声区域更加集中，下降更快
+        
+        # --- 精确查找 timestep 对应的 sigma ---
+        timestep_device = timestep.to(self.timesteps.device)
+        # 处理批量 timestep 的情况
+        if timestep.dim() == 0:
+            timestep_id = torch.argmin((self.timesteps - timestep_device).abs())
+        else:
+            timestep_id = torch.argmin((self.timesteps.unsqueeze(0) - timestep_device.unsqueeze(1)).abs(), dim=1)
+        
+        # 获取精确的 sigma 值
+        sigma = self.sigmas[timestep_id]
+        
+        # --- 低噪声权重计算 (基于 SNR，使用平方加快下降) ---
+        # 计算 SNR (信噪比)
+        snr = ((1 - sigma) / (sigma + 1e-8)) ** 2
+        
+        # 计算 log(SNR)，并平方以加快下降速度
+        log_snr = torch.log(snr + 1e-8)
+        weights = torch.clamp(log_snr, min=0) ** 2  # 使用平方使下降更陡峭
+        
+        # 归一化权重，避免数值过大
+        weights = weights / (weights.mean() + 1e-8)
+        
         return weights
     
     

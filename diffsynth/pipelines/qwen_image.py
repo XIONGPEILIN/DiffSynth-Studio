@@ -147,7 +147,9 @@ class QwenImagePipeline(BasePipeline):
         noise_pred = self.model_fn(**inputs, timestep=timestep)
         
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
+        print(f"Training Loss: {loss.item()}")
         loss = loss * self.scheduler.training_weight(timestep)
+        print(f"Weighted Training Loss: {loss.item()}")
         return loss
     
     

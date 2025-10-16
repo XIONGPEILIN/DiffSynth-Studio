@@ -105,45 +105,38 @@ class FlowMatchScheduler():
         return target
     
 
+
     def training_weight(self, timestep):
-        # 策略: 使用陡峭的低噪声权重，取消高斯中噪声权重
-        # 使用 log(SNR)^2 使权重在低噪声区域更加集中，下降更快
+        t_tensor = torch.tensor([timestep])
         
-        # --- 精确查找 timestep 对应的 sigma ---
-        # 保存原始设备，用于最后返回
-        original_device = timestep.device
-        
-        # 将 timestep 移到 CPU 进行索引查找（与其他方法保持一致）
-        if isinstance(timestep, torch.Tensor):
-            timestep_cpu = timestep.cpu()
-        else:
-            timestep_cpu = timestep
-            
-        # 处理批量 timestep 的情况
-        if timestep_cpu.dim() == 0:
-            timestep_id = torch.argmin((self.timesteps - timestep_cpu).abs())
-        else:
-            timestep_id = torch.argmin((self.timesteps.unsqueeze(0) - timestep_cpu.unsqueeze(1)).abs(), dim=1)
-        
-        # 获取精确的 sigma 值
+        # 获取 sigma (加噪强度)
+        timestep_device = t_tensor.to(timestep.device)
+        timestep_id = torch.argmin((timestep - timestep_device).abs())
         sigma = self.sigmas[timestep_id]
         
-        # --- 低噪声权重计算 (基于 SNR，使用平方加快下降) ---
-        # 计算 SNR (信噪比)
+        # 原权重: 只有高斯中噪声权重 (旧代码的实现)
+        old_weight = self.linear_timesteps_weights[timestep_id]
+
+        # 新权重: 双峰分布 (原高斯峰 + 基于SNR的峰)
         snr = ((1 - sigma) / (sigma + 1e-8)) ** 2
         
-        # 计算 log(SNR)，并平方以加快下降速度
+        # 峰1: 保留原始高斯峰
+        gaussian_peak = old_weight
+        
+        # 峰2: 基于 SNR 的峰 (用于增强光影学习)
         log_snr = torch.log(snr + 1e-8)
-        weights = torch.clamp(log_snr, min=0) ** 2  # 使用平方使下降更陡峭
+        log_snr_center = 0      # SNR峰中心位置 (对应低timestep区域)
+        log_snr_std = 1         # SNR峰宽度
+        snr_peak_strength = 2  # SNR峰强度系数
         
-        # 归一化权重，控制最大值在 7 左右（与原权重量级一致）
-        # 使用固定缩放因子，避免按均值归一化导致权重过大
-        weights = weights / 8.5  # 60.59 / 8.5 ≈ 7.13
+        # 计算基于 SNR 的高斯峰
+        distance_from_center = torch.abs(log_snr - log_snr_center)
+        snr_peak = snr_peak_strength * torch.exp(-0.5 * (distance_from_center / log_snr_std) ** 2)
         
-        # 将权重移回原始设备
-        weights = weights.to(original_device)
-        
-        return weights
+        # 组合双峰: 原高斯峰 + SNR峰
+        new_weight = gaussian_peak + snr_peak
+        print(f"Timestep: {timestep}, Sigma: {sigma:.4f}, Old Weight: {old_weight:.4f}, New Weight: {new_weight:.4f}")
+        return new_weight
     
     
     def calculate_shift(

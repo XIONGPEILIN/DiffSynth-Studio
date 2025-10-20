@@ -551,7 +551,7 @@ def launch_training_task(
     print(f"Number of total parameters: {len(list(model.parameters()))}")
     print(f"Trainable parameter ratio: {len(list(model.trainable_modules())) / len(list(model.parameters())):.2%}")
     print(f"Trainable parameter names: {model.trainable_param_names()}")
-    scheduler = torch.optim.lr_scheduler.ConstantLR(optimizer)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0)
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -569,15 +569,16 @@ def launch_training_task(
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
-                    loss = model({}, inputs=data)
+                    loss, org_loss = model({}, inputs=data)
                 else:
-                    loss = model(data)
+                    loss, org_loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps)
                 scheduler.step()
                 if wandb_project is not None:
                     accelerator.log({"loss": loss.item()})
+                    accelerator.log({"org_loss": org_loss.item()})
                 # Update progress bar with loss
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
         if save_steps is None:

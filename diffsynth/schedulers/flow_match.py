@@ -59,42 +59,10 @@ class FlowMatchScheduler():
             self.sigmas = 1 - self.sigmas
         self.timesteps = self.sigmas * self.num_train_timesteps
         if training:
-            # --- 开始修改 ---
-            
             x = self.timesteps
-
-            # 1. 计算原始的、以中点为中心的钟形曲线 (第一个峰)
-            y_mid = torch.exp(-2 * ((x - num_inference_steps / 2) / num_inference_steps) ** 2)
-
-            # 2. 定义并计算新的高噪声区域的尖峰 (第二个峰)
-            
-            # --- 您可以在这里调整这些超参数 ---
-            # 峰值的位置 (0.0 to 1.0, 0.9 代表在 90% 的 timestep 处)
-            high_noise_peak_pos = 0.9
-            # 峰值的“胖瘦”/宽度 (数值越小，峰越尖锐)
-            high_noise_peak_width = 0.03 
-            # 峰值的“高度”/强度 (相对于第一个峰的高度)
-            high_noise_peak_scale = 0.2   
-            # ------------------------------------
-
-            # 将相对位置和宽度转换为绝对时间步
-            center_timestep = num_inference_steps * high_noise_peak_pos
-            width_timesteps = num_inference_steps * high_noise_peak_width + 1e-8 # 防止除以零
-
-            # 计算第二个高斯峰
-            y_high = high_noise_peak_scale * torch.exp(-0.5 * ((x - center_timestep) / width_timesteps) ** 2)
-
-            # 3. 将两个峰的权重相加，形成双峰曲线
-            y = y_mid + y_high
-
-            # --- 修改结束 ---
-
-            # 4. 后续的归一化处理保持不变
+            y = torch.exp(-2 * ((x - num_inference_steps / 2) / num_inference_steps) ** 2)
             y_shifted = y - y.min()
-            
-            epsilon = 1e-8
-            bsmntw_weighing = y_shifted * (num_inference_steps / (y_shifted.sum() + epsilon))
-            
+            bsmntw_weighing = y_shifted * (num_inference_steps / y_shifted.sum())
             self.linear_timesteps_weights = bsmntw_weighing
             self.training = True
         else:

@@ -7,6 +7,8 @@ import pandas as pd
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
+import math
+from torch.optim.lr_scheduler import LambdaLR
 
 
 
@@ -520,6 +522,30 @@ class ModelLogger:
             accelerator.save(state_dict, path, safe_serialization=True)
 
 
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, min_lr_ratio=0.01):
+    """
+    创建带 warmup 的余弦退火学习率调度器
+    
+    Args:
+        optimizer: 优化器
+        num_warmup_steps: warmup 步数
+        num_training_steps: 总训练步数
+        min_lr_ratio: 最小学习率相对于初始学习率的比例 (默认 0.01 = 1%)
+    
+    Returns:
+        LambdaLR 调度器
+    """
+    def lr_lambda(current_step):
+        # Warmup 阶段: 线性增长
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # 余弦退火阶段
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(min_lr_ratio, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    
+    return LambdaLR(optimizer, lr_lambda)
+
+
 def launch_training_task(
     dataset: torch.utils.data.Dataset,
     model: DiffusionTrainingModule,
@@ -551,8 +577,24 @@ def launch_training_task(
     print(f"Number of total parameters: {len(list(model.parameters()))}")
     print(f"Trainable parameter ratio: {len(list(model.trainable_modules())) / len(list(model.parameters())):.2%}")
     print(f"Trainable parameter names: {model.trainable_param_names()}")
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0)
+    
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    
+    # 计算总训练步数
+    total_steps = len(dataloader) * num_epochs
+    warmup_steps = int(total_steps * 0.05)  # 5% warmup
+    print(f"Total training steps: {total_steps}")
+    print(f"Warmup steps: {warmup_steps} (5% of total)")
+    print(f"Learning rate schedule: {learning_rate} -> {learning_rate * 0.01} (min)")
+    
+    # 使用带 warmup 的余弦退火调度器
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+        min_lr_ratio=0.01  # 最小学习率为初始学习率的1%
+    )
+    
     accelerator = Accelerator(
         gradient_accumulation_steps=gradient_accumulation_steps,
         kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=find_unused_parameters)],
@@ -578,17 +620,19 @@ def launch_training_task(
                     loss, org_loss = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
+                scheduler.step()  # 每步更新学习率
                 model_logger.on_step_end(accelerator, model, save_steps)
                 if wandb_project is not None:
                     accelerator.log({"loss": loss.item()})
                     accelerator.log({"org_loss": org_loss.item()})
                     accelerator.log({"lr": scheduler.get_last_lr()[0]})
-                # Update progress bar with loss
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                # Update progress bar with loss and learning rate
+                pbar.set_postfix({
+                    "loss": f"{loss.item():.4f}",
+                    "lr": f"{scheduler.get_last_lr()[0]:.2e}"
+                })
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
-        # Update learning rate after each epoch
-        scheduler.step()
         #save resume state
         accelerator.save_state('train/resume')
     model_logger.on_training_end(accelerator, model, save_steps)

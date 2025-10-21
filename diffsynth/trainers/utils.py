@@ -562,6 +562,10 @@ def launch_training_task(
         accelerator.init_trackers(project_name=wandb_project, config=vars(args), init_kwargs={"wandb": {"name": wandb_name}})
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     
+    resume_path = os.path.join(args.output_path, "accelerator_state")
+    os.makedirs(resume_path, exist_ok=True)
+
+
     for epoch_id in range(num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}")
         for data in pbar:
@@ -575,14 +579,18 @@ def launch_training_task(
                 accelerator.backward(loss)
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps)
-                scheduler.step()
                 if wandb_project is not None:
                     accelerator.log({"loss": loss.item()})
                     accelerator.log({"org_loss": org_loss.item()})
+                    accelerator.log({"lr": scheduler.get_last_lr()[0]})
                 # Update progress bar with loss
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+        # Update learning rate after each epoch
+        scheduler.step()
+        #save resume state
+        accelerator.save_state('train/resume')
     model_logger.on_training_end(accelerator, model, save_steps)
 
 

@@ -12,7 +12,8 @@ from torch.optim.lr_scheduler import LambdaLR
 
 
 
-
+def collate_first(batch):
+    return batch[0] if batch else None
 
 class ImageDataset(torch.utils.data.Dataset):
     def __init__(
@@ -578,7 +579,7 @@ def launch_training_task(
     print(f"Trainable parameter ratio: {len(list(model.trainable_modules())) / len(list(model.parameters())):.2%}")
     print(f"Trainable parameter names: {model.trainable_param_names()}")
     
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=collate_first, num_workers=num_workers)
     
     # 计算总训练步数
     total_steps = len(dataloader) * num_epochs
@@ -592,7 +593,7 @@ def launch_training_task(
         optimizer, 
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
-        min_lr_ratio=0.01  # 最小学习率为初始学习率的1%
+        min_lr_ratio=0.001  # 最小学习率为初始学习率的1%
     )
     
     accelerator = Accelerator(
@@ -648,7 +649,7 @@ def launch_data_process_task(
     if args is not None:
         num_workers = args.dataset_num_workers
         
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=collate_first, num_workers=num_workers)
     accelerator = Accelerator()
     model, dataloader = accelerator.prepare(model, dataloader)
     

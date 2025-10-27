@@ -624,9 +624,14 @@ def launch_training_task(
                 scheduler.step()  # 每步更新学习率
                 model_logger.on_step_end(accelerator, model, save_steps)
                 if wandb_project is not None:
-                    accelerator.log({"loss": loss.item()})
-                    accelerator.log({"org_loss": org_loss.item()})
-                    accelerator.log({"lr": scheduler.get_last_lr()[0]})
+                    accelerator.log(
+                        {
+                            "loss": loss.item(),
+                            "org_loss": org_loss.item(),
+                            "lr": scheduler.get_last_lr()[0],
+                        },
+                        step=model_logger.num_steps,
+                    )
                 # Update progress bar with loss and learning rate
                 pbar.set_postfix({
                     "loss": f"{loss.item():.4f}",

@@ -320,8 +320,32 @@ class QwenImageUnit_SubInputImageEmbedder(PipelineUnit):
         if ref_gt is None:
             return {"sub_latents": sub_noise, "sub_input_latents": None}
         pipe.load_models_to_device(['vae'])
-        image = pipe.preprocess_image(ref_gt).to(device=pipe.device, dtype=pipe.torch_dtype)
-        input_latents = pipe.vae.encode(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        
+        # Manual preprocessing to support variable size inputs (e.g., crops)
+        if not isinstance(ref_gt, list):
+            ref_gt = [ref_gt]
+        
+        images = []
+        for img in ref_gt:
+            # Ensure PIL Image
+            if not isinstance(img, Image.Image):
+                continue
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            
+            # To Tensor [-1, 1]
+            arr = np.array(img).astype(np.float32) / 127.5 - 1.0
+            images.append(arr)
+        
+        if not images:
+             return {}
+
+        images = np.stack(images, axis=0) # [B, H, W, 3]
+        images = torch.from_numpy(images).permute(0, 3, 1, 2) # [B, 3, H, W]
+        images = images.to(device=pipe.device, dtype=pipe.torch_dtype)
+        
+        input_latents = pipe.vae.encode(images, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        
         if pipe.scheduler.training:
             return {"sub_latents": sub_noise, "sub_input_latents": input_latents}
         else:

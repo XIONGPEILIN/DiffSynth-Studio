@@ -135,3 +135,6 @@ class TrajectoryImitationLoss(torch.nn.Module):
         loss_2 = self.compute_regularization(pipe, trajectory_teacher, inputs_shared, inputs_posi, inputs_nega, 8, 1)
         loss = loss_1 + loss_2
         return loss
+
+
+

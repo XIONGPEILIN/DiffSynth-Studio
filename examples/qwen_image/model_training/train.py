@@ -1,4 +1,5 @@
 import torch, os, argparse, accelerate
+from PIL import Image
 from diffsynth.core import UnifiedDataset
 from diffsynth.pipelines.qwen_image import QwenImagePipeline, ModelConfig
 from diffsynth.diffusion import *
@@ -70,6 +71,18 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
             "edit_image_auto_resize": True,
         }
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
+
+        # Synthesize back_mask if missing
+        if "back_mask" not in inputs_shared:
+            if "mask" in data:
+                inputs_shared["back_mask"] = data["mask"]
+            elif "edit_image" in inputs_shared:
+                edit_img = inputs_shared["edit_image"]
+                if isinstance(edit_img, list) and len(edit_img) > 0:
+                    edit_img = edit_img[0]
+                if isinstance(edit_img, Image.Image) and edit_img.mode == "RGBA":
+                    inputs_shared["back_mask"] = edit_img.split()[-1]
+
         return inputs_shared, inputs_posi, inputs_nega
     
     def forward(self, data, inputs=None):

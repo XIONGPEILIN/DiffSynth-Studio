@@ -405,208 +405,92 @@ class QwenImageTransformerBlock(nn.Module):
 
 
 
-class STEBlock(nn.Module):
-    """Transformer-encoder-style block used before每层 STE head."""
-
-    def __init__(self, dim_in: int = 3072, dim: int = 64, num_heads: int = 8, encoder_layers: int = 1):
+class STEHead(nn.Module):
+    def __init__(self, dim: int = 3072):
         super().__init__()
-        self.proj_down = nn.Linear(dim_in, dim)
-        if encoder_layers > 0:
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=dim,
-                nhead=num_heads,
-                dim_feedforward=dim,
-                batch_first=True,
-                norm_first=True,
-            )
-            encoder_layer.norm1 = RMSNorm(dim, eps=1e-6)
-            encoder_layer.norm2 = RMSNorm(dim, eps=1e-6)
-            self.encoder = nn.TransformerEncoder(
-                encoder_layer,
-                num_layers=encoder_layers,
-                norm=RMSNorm(dim, eps=1e-6),
-            )
-        else:
-            self.encoder = nn.Identity()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj_down(x)
-        input_dim = x.dim()
-        if input_dim == 2:
-            x = x.unsqueeze(0)
-            out = self.encoder(x).squeeze(0)
-        else:
-            out = self.encoder(x)
-        return out
-
-
+        # Feature Projection (Trainable)
+        self.proj_q = nn.Linear(dim, dim) # Source (Main Masked Region)
+        self.proj_k = nn.Linear(dim, dim) # Target (Sub Image)
+        
+        # Normalization
+        self.norm_q = RMSNorm(dim, eps=1e-6)
+        self.norm_k = RMSNorm(dim, eps=1e-6)
+        
+        # Learnable Dustbin
+        self.dustbin = nn.Parameter(torch.randn(1, dim))
+        
+    def forward(self, query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            query: [B, N, C] - Source (Main Masked Region)
+            key: [B, M, C] - Target (Sub Image)
+        Returns:
+            probs: [B, N, M+1] - Matching probabilities (last dim is dustbin)
+        """
+        # 1. Feature Projection
+        q = self.proj_q(query)  # [B, N, C]
+        k = self.proj_k(key)    # [B, M, C]
+        
+        # 2. Normalization
+        q = self.norm_q(q)
+        k = self.norm_k(k)
+        
+        # 3. Augmented Search Space (Concat Dustbin)
+        B, M, C = k.shape
+        # Apply norm to dustbin as well
+        dustbin = self.norm_k(self.dustbin) # [1, C]
+        dustbin = dustbin.unsqueeze(0).expand(B, 1, C) # [B, 1, C]
+        k_augmented = torch.cat([k, dustbin], dim=1) # [B, M+1, C]
+        
+        # 4. Correlation Computation
+        # Logits = (q . k^T)
+        logits = torch.bmm(q, k_augmented.transpose(1, 2)) # [B, N, M+1]
+        
+        # 5. Output Processing (Discrete Coordinate Regression via Gumbel-Softmax)
+        # hard=True returns one-hot tensor, but gradients flow through soft estimate
+        probs = nn.functional.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1) # [B, N, M+1]
+        
+        return probs
 
 class STE(nn.Module):
     """
-    按层调用的 STE：
-      - 初始化时注册 num_layers 个 Linear head
-      - 每次 forward 只处理一个 layer_idx 对应的 head
-      - 前向严格 {0,1}；训练期用 ST 传梯度
+    Semantic Coordinate Localization System via DiT Latents
     """
     def __init__(
         self,
         dim_in: int = 3072,
-        dim_out: int = 1,
         num_layers: int = 60,
-        sampler: str = "vanilla_ste",                # "gumbel" | "bernoulli" | "hard_concrete" | "vanilla_ste"
-        temperature: float = 1.0,
-        min_temperature: float = 0.3,
-        anneal_strategy: str = "exp",           # "exp" | "linear" | "none"
-        anneal_rate: float = 3e-5,
-        eval_temperature: Optional[float] = None,
-        # 正则(可选)
-        entropy_weight: float = 0.0,
-        sparsity_target: Optional[float] = None,
-        sparsity_weight: float = 0.0,
-        # hard-concrete
-        hc_beta: float = 2/3,
-        hc_gamma: float = -0.1,
-        hc_zeta: float = 1.1,
-        # 其他
-        grad_scale: float = 1.0,
-        head_init: str = "zero",                # "zero" | "normal"
-        head_init_std: float = 1e-3,
-        return_aux: bool = False,
-        reduce_batch: bool = True,
-        encoder_layers: int = 1,
-        encoder_num_heads: int = 8,
     ):
         super().__init__()
-        assert sampler in ("gumbel", "bernoulli", "hard_concrete", "vanilla_ste")
-        self.dim_in, self.dim_out, self.num_layers = dim_in, dim_out, num_layers
-        self.sampler = sampler
-        self.return_aux = return_aux
-        self.reduce_batch = bool(reduce_batch)
-
-        # 温度
-        self.register_buffer("tau", torch.tensor(float(temperature)))
-        self.tau_min = float(min_temperature)
-        self.anneal_strategy = anneal_strategy
-        self.anneal_rate = float(anneal_rate)
-        self.eval_tau = float(eval_temperature) if eval_temperature is not None else None
-
-        # 正则
-        self.entropy_weight = float(entropy_weight)
-        self.sparsity_target = sparsity_target
-        self.sparsity_weight = float(sparsity_weight)
-
-        # hard-concrete 参数
-        self.hc_beta = float(hc_beta)
-        self.hc_gamma = float(hc_gamma)
-        self.hc_zeta = float(hc_zeta)
-
-        self.grad_scale = float(grad_scale)
-
-        # 60 个 head（每层一个）
-        self.heads = nn.ModuleList([nn.Linear(64, dim_out) for _ in range(num_layers)])
-        if head_init == "zero":
-            for head in self.heads:
-                nn.init.zeros_(head.weight); nn.init.zeros_(head.bias)
-        else:
-            for head in self.heads:
-                nn.init.normal_(head.weight, mean=0.0, std=head_init_std)
-                nn.init.zeros_(head.bias)
-        self.ste_blocks = nn.ModuleList([
-            STEBlock(dim_in=dim_in, dim=64, num_heads=encoder_num_heads, encoder_layers=encoder_layers)
+        self.num_layers = num_layers
+        self.heads = nn.ModuleList([
+            STEHead(dim=dim_in)
             for _ in range(num_layers)
         ])
+        
+        # Keep these attributes to avoid breaking potential external references, though unused
+        self.return_aux = False
+        self.reduce_batch = True
 
-    # --------- 工具 ---------
-    @torch.no_grad()
-    def _sample_logistic_noise(self, shape, device, dtype, eps: float = 1e-6):
-        u = torch.rand(shape, device=device, dtype=dtype).clamp_(eps, 1.0 - eps)
-        return torch.log(u) - torch.log(1.0 - u)
-
-    def _straight_through(self, y_soft: torch.Tensor, y_hard: torch.Tensor) -> torch.Tensor:
-        return y_hard + self.grad_scale * (y_soft - y_soft.detach())
-
-    # --------- 采样器 ---------
-    def _gumbel_hard(self, logits: torch.Tensor, tau: torch.Tensor):
-        g = self._sample_logistic_noise(logits.shape, logits.device, logits.dtype)
-        y_soft = torch.sigmoid((logits + g) / tau)
-        y_hard = (y_soft >= 0.5).to(logits.dtype)
-        return self._straight_through(y_soft, y_hard), y_soft
-
-    def _bernoulli_hard(self, logits: torch.Tensor, tau: torch.Tensor):
-        probs = torch.sigmoid(logits / tau)
-        y_sample = torch.bernoulli(probs)
-        y = self._straight_through(probs, y_sample)
-        return y, probs
-
-    def _hard_concrete(self, logits: torch.Tensor, tau: torch.Tensor):
-        u = torch.rand_like(logits).clamp_(1e-6, 1 - 1e-6)
-        s = torch.sigmoid((logits + torch.log(u) - torch.log(1 - u)) / self.hc_beta)
-        z_tilde = s * (self.hc_zeta - self.hc_gamma) + self.hc_gamma
-        z = z_tilde.clamp_(0.0, 1.0)
-        y_hard = (z >= 0.5).to(logits.dtype)
-        y = self._straight_through(z, y_hard)
-        probs = torch.sigmoid(logits / tau)  # 作为监控/正则的无噪声代理
-        return y, probs
-
-    def _vanilla_ste(self, logits: torch.Tensor):
-        y_hard = (logits >= 0).to(logits.dtype)      # 前向严格 {0,1}
-        y_soft = torch.sigmoid(logits)               # 反向代理
-        y = self._straight_through(y_soft, y_hard)
-        return y, y_soft
-
-    # --------- 温度退火（建议每个 global step 调一次） ---------
-    def anneal_temperature(self, steps: int = 1) -> float:
-        if self.anneal_strategy == "none" or self.anneal_rate <= 0:
-            return float(self.tau)
-        if self.anneal_strategy == "exp":
-            with torch.no_grad():
-                self.tau.mul_(math.exp(-self.anneal_rate * steps)).clamp_(min=self.tau_min)
-        elif self.anneal_strategy == "linear":
-            with torch.no_grad():
-                self.tau.sub_(self.anneal_rate * steps).clamp_(min=self.tau_min)
-        return float(self.tau)
-
-    # --------- 前向：单层调用 ---------
     def forward(
         self,
-        h: torch.Tensor,         # [B, L, dim_in] 或 [L, dim_in]
-        layer_idx: int,          # 使用第 layer_idx 个 head
+        query: torch.Tensor,     # [B, N, C]
+        key: torch.Tensor,       # [B, M, C]
+        layer_idx: int,
     ):
-
-        ste_block = self.ste_blocks[layer_idx]
-        h_enc = ste_block(h)
-
+        """
+        Dispatcher to the specific head for the given layer.
+        """
+        if layer_idx >= len(self.heads):
+            # Fallback
+            N, M = query.shape[1], key.shape[1]
+            probs = torch.zeros((query.shape[0], N, M+1), device=query.device, dtype=query.dtype)
+            probs[..., -1] = 1.0 # Default to dustbin
+            return probs, {}
+            
         head = self.heads[layer_idx]
-        logits = head(h_enc)  # [L, dim_out] or [B, L, dim_out]
-        tau = self.tau if self.training or self.eval_tau is None else torch.tensor(self.eval_tau, device=h.device, dtype=h.dtype)
-
-        if self.training:
-            if self.sampler == "gumbel":
-                mask, probs = self._gumbel_hard(logits, tau)
-            elif self.sampler == "bernoulli":
-                mask, probs = self._bernoulli_hard(logits, tau)
-            elif self.sampler == "hard_concrete":
-                mask, probs = self._hard_concrete(logits, tau)
-            else:
-                mask, probs = self._vanilla_ste(logits)
-        else:
-            probs = torch.sigmoid(logits / tau)
-            mask  = (probs >= 0.5).to(logits.dtype)
-
-        # 可选正则（仅用本层概率）
-        reg_loss = torch.as_tensor(0.0, device=h.device, dtype=h.dtype)
-        if self.training and (self.entropy_weight > 0.0 or (self.sparsity_target is not None and self.sparsity_weight > 0.0)):
-            p = probs.clamp(1e-6, 1 - 1e-6)
-            if self.entropy_weight > 0.0:
-                ent = -(p * p.log() + (1 - p) * (1 - p).log())
-                reg_loss = reg_loss + ent.mean() * self.entropy_weight
-            if self.sparsity_target is not None and self.sparsity_weight > 0.0:
-                mean_p = p.mean()
-                target = torch.tensor(self.sparsity_target, device=p.device, dtype=p.dtype)
-                reg_loss = reg_loss + F.mse_loss(mean_p, target) * self.sparsity_weight
-
-        aux = {"probs": probs, "logits": logits, "reg_loss": reg_loss, "temperature": torch.as_tensor(float(tau), device=h.device, dtype=h.dtype)}
-        return mask, (aux if self.return_aux else {})
+        probs = head(query, key)
+        return probs, {}
 
 class QwenImageDiT(torch.nn.Module):
     def __init__(

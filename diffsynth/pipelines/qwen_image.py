@@ -9,7 +9,7 @@ from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit, ControlNetInput
 
-from ..models.qwen_image_dit import QwenImageDiT
+from ..models.qwen_image_dit import QwenImageDiT, STE
 from ..models.qwen_image_text_encoder import QwenImageTextEncoder
 from ..models.qwen_image_vae import QwenImageVAE
 from ..models.qwen_image_controlnet import QwenImageBlockWiseControlNet
@@ -31,11 +31,13 @@ class QwenImagePipeline(BasePipeline):
         self.blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None
         self.tokenizer: Qwen2Tokenizer = None
         self.processor: Qwen2VLProcessor = None
-        self.in_iteration_models = ("dit", "blockwise_controlnet")
+        self.in_iteration_models = ("dit", "blockwise_controlnet", "ste")
         self.units = [
             QwenImageUnit_ShapeChecker(),
             QwenImageUnit_NoiseInitializer(),
+            QwenImageUnit_MaskGuidedNoise(),
             QwenImageUnit_InputImageEmbedder(),
+            QwenImageUnit_SubInputImageEmbedder(),
             QwenImageUnit_Inpaint(),
             QwenImageUnit_EditImageEmbedder(),
             QwenImageUnit_ContextImageEmbedder(),
@@ -44,6 +46,8 @@ class QwenImagePipeline(BasePipeline):
             QwenImageUnit_BlockwiseControlNet(),
         ]
         self.model_fn = model_fn_qwen_image
+        self.ste = STE()
+        self.ste = self.ste.to(device=self.device, dtype=self.torch_dtype)
     
     
     @staticmethod
@@ -119,6 +123,7 @@ class QwenImagePipeline(BasePipeline):
         tile_stride: int = 64,
         # Progress bar
         progress_bar_cmd = tqdm,
+        back_mask: Image.Image = None,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
@@ -142,6 +147,7 @@ class QwenImagePipeline(BasePipeline):
             "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative,
             "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize, "edit_rope_interpolation": edit_rope_interpolation, 
             "context_image": context_image,
+            "back_mask": back_mask
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -151,20 +157,49 @@ class QwenImagePipeline(BasePipeline):
         models = {name: getattr(self, name) for name in self.in_iteration_models}
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
-            noise_pred = self.cfg_guided_model_fn(
-                self.model_fn, cfg_scale,
-                inputs_shared, inputs_posi, inputs_nega,
-                **models, timestep=timestep, progress_id=progress_id
-            )
-            inputs_shared["latents"] = self.step(self.scheduler, progress_id=progress_id, noise_pred=noise_pred, **inputs_shared)
+            
+            # Inference
+            output_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
+            if isinstance(output_posi, tuple):
+                noise_pred_posi, sub_noise_pred_posi = output_posi
+            else:
+                noise_pred_posi, sub_noise_pred_posi = output_posi, None
+
+            if cfg_scale != 1.0:
+                output_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
+                if isinstance(output_nega, tuple):
+                    noise_pred_nega, sub_noise_pred_nega = output_nega
+                else:
+                    noise_pred_nega, sub_noise_pred_nega = output_nega, None
+                
+                noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
+                if sub_noise_pred_posi is not None and sub_noise_pred_nega is not None:
+                    sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
+                else:
+                    sub_noise_pred = None
+            else:
+                noise_pred = noise_pred_posi
+                sub_noise_pred = sub_noise_pred_posi
+
+            # Scheduler
+            step_kwargs = {k: v for k, v in inputs_shared.items() if k not in ["latents", "sub_latents"]}
+            inputs_shared["latents"] = self.step(self.scheduler, latents=inputs_shared["latents"], progress_id=progress_id, noise_pred=noise_pred, **step_kwargs)
+            if sub_noise_pred is not None and "sub_latents" in inputs_shared and inputs_shared["sub_latents"] is not None:
+                inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
         
         # Decode
         self.load_models_to_device(['vae'])
         image = self.vae.decode(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         image = self.vae_output_to_image(image)
+        
+        sub_image = None
+        if "sub_latents" in inputs_shared and inputs_shared["sub_latents"] is not None:
+            sub_image = self.vae.decode(inputs_shared["sub_latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+            sub_image = self.vae_output_to_image(sub_image)
+            
         self.load_models_to_device([])
 
-        return image
+        return image, sub_image
 
 
 class QwenImageBlockwiseMultiControlNet(torch.nn.Module):
@@ -220,6 +255,78 @@ class QwenImageUnit_NoiseInitializer(PipelineUnit):
         noise = pipe.generate_noise((1, 16, height//8, width//8), seed=seed, rand_device=rand_device, rand_torch_dtype=pipe.torch_dtype)
         return {"noise": noise}
 
+
+class QwenImageUnit_MaskGuidedNoise(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("noise", "back_mask", "height", "width", "rand_device",),
+        )
+
+    def process(self, pipe: QwenImagePipeline, noise, back_mask, height, width, rand_device):
+        back_mask = back_mask.convert("L")
+        bbox = back_mask.getbbox() if back_mask is not None else None
+        if bbox is None:
+            return {}
+        
+        # PIL getbbox() returns (left, upper, right, lower) = (x1, y1, x2, y2)
+        left, upper, right, lower = bbox
+        
+        # 计算能被16整除的新坐标，确保包含整个mask区域
+        # 左上角向下取整（扩展）到最近的16倍数
+        new_left = (left // 16) * 16
+        new_upper = (upper // 16) * 16
+        
+        # 右下角向上取整（扩展）到最近的16倍数
+        new_right = ((right + 16 - 1) // 16) * 16
+        new_lower = ((lower + 16 - 1) // 16) * 16
+        
+        # 确保新坐标在图片范围内
+        new_left = max(0, new_left)
+        new_upper = max(0, new_upper)
+        new_right = min(width, new_right)
+        new_lower = min(height, new_lower)
+        
+        # 转换到 latent space 的坐标 (除以16)
+        x1, y1, x2, y2 = new_left // 16, new_upper // 16, new_right // 16, new_lower // 16
+
+
+        b, c, h, w = noise.shape
+        # Calculate patch dimensions in latent space (divided by 8)
+        h_patch = (y2 - y1) * 2
+        w_patch = (x2 - x1) * 2
+        
+        if y1 >= y2 or x1 >= x2:
+            return {}
+
+        patch = pipe.generate_noise(
+            (b, c, h_patch, w_patch),
+            rand_device=rand_device,
+            rand_torch_dtype=pipe.torch_dtype,
+            device=noise.device,
+            torch_dtype=noise.dtype,
+        )
+
+        return {"sub_noise": patch, "subyx": (y1, y2, x1, x2)}
+
+
+class QwenImageUnit_SubInputImageEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("ref_gt", "sub_noise", "tiled", "tile_size", "tile_stride"),
+            onload_model_names=("vae",)
+        )
+
+    def process(self, pipe: QwenImagePipeline, ref_gt, sub_noise, tiled, tile_size, tile_stride):
+        if ref_gt is None:
+            return {"sub_latents": sub_noise, "sub_input_latents": None}
+        pipe.load_models_to_device(['vae'])
+        image = pipe.preprocess_image(ref_gt).to(device=pipe.device, dtype=pipe.torch_dtype)
+        input_latents = pipe.vae.encode(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        if pipe.scheduler.training:
+            return {"sub_latents": sub_noise, "sub_input_latents": input_latents}
+        else:
+            latents = pipe.scheduler.add_noise(input_latents, sub_noise, timestep=pipe.scheduler.timesteps[0])
+            return {"sub_latents": latents, "sub_input_latents": input_latents}
 
 
 class QwenImageUnit_InputImageEmbedder(PipelineUnit):
@@ -532,8 +639,27 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
         return {"context_latents": context_latents}
 
 
+def swpe(img_pe, subyx,img_shapes):
+    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
+    y1, y2, x1, x2 = subyx
+    pe = img_pe.clone()
+    img1_patch_shape = img_shapes[0]
+    img2_patch_shape = img_shapes[1]
+    img1_length = img1_patch_shape[1] * img1_patch_shape[2]
+    img2_length = img2_patch_shape[1] * img2_patch_shape[2]
+    image1_pe = pe[:img1_length, :]
+    image2_pe = pe[img1_length:img1_length + img2_length, :]
+    image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
+    image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
+    image2_pe = image1_pe[y1:y2, x1:x2, :]
+    image2_pe = image2_pe.reshape(img2_length, -1)
+    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
+    return pe
+
+
 def model_fn_qwen_image(
     dit: QwenImageDiT = None,
+    ste: STE = None,
     blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None,
     latents=None,
     timestep=None,
@@ -554,6 +680,8 @@ def model_fn_qwen_image(
     use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
     edit_rope_interpolation=False,
+    sub_latents=None,
+    subyx=None,
     **kwargs
 ):
     img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
@@ -562,6 +690,22 @@ def model_fn_qwen_image(
     
     image = rearrange(latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=height//16, W=width//16, P=2, Q=2)
     image_seq_len = image.shape[1]
+
+
+    sub = None
+    if sub_latents is not None:
+        y1, y2, x1, x2 = subyx
+        img_shapes += [(sub_latents.shape[0], sub_latents.shape[2]//2, sub_latents.shape[3]//2)]
+        h_s, w_s = y2 - y1, x2 - x1
+        sub = rearrange(sub_latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=h_s, W=w_s, P=2, Q=2)
+
+    
+    if sub is not None:
+        image = torch.cat([image, sub], dim=1)
+        noise_len = image.shape[1]
+    else:
+        noise_len = None
+
 
     if context_latents is not None:
         img_shapes += [(context_latents.shape[0], context_latents.shape[2]//2, context_latents.shape[3]//2)]
@@ -588,12 +732,89 @@ def model_fn_qwen_image(
         else:
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
-        
+
+    if subyx is not None:
+        # Build swapped PE without per-head expansion; keep 2D [seq, dim]
+        pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
+
+
     if blockwise_controlnet_conditioning is not None:
         blockwise_controlnet_conditioning = blockwise_controlnet.preprocess(
             blockwise_controlnet_inputs, blockwise_controlnet_conditioning)
 
+
+    img_freqs, txt_freqs = image_rotary_emb
+    # Keep rotary embeddings 2D ([seq, dim]); rely on broadcast over heads in attention
+    running_img_freqs = img_freqs
+
     for block_id, block in enumerate(dit.transformer_blocks):
+        block_rotary = (running_img_freqs, txt_freqs)
+        
+        if sub is not None:
+             # 1. Extract Query (Main Latents @ Mask)
+             # Reshape main image to 2D spatial
+             main_img = image[:, :image_seq_len]
+             H_grid, W_grid = height // 16, width // 16 # Patch Grid Size
+             
+             # image: B (H W) D -> B H W D
+             main_img_2d = rearrange(main_img, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
+             
+             y1, y2, x1, x2 = subyx
+             query_2d = main_img_2d[:, y1:y2, x1:x2, :]
+             query = rearrange(query_2d, "B h w D -> B (h w) D")
+             
+             # 2. Extract Key (Sub Latents)
+             key = image[:, image_seq_len:noise_len] # [B, L_sub, D]
+             
+             # 3. STE
+             with torch.autocast('cuda', dtype=torch.bfloat16):
+                 probs, _ = ste(query, key, layer_idx=block_id)
+             
+             # 4. Extract PEs
+             # image_rotary_emb[0] is [L_total, D] (shared across batch)
+             full_pe = image_rotary_emb[0]
+             sub_pe = full_pe[image_seq_len:noise_len] # [L_sub, D]
+             
+             # Base Main PE @ Mask
+             main_pe = full_pe[:image_seq_len]
+             main_pe_2d = rearrange(main_pe, "(H W) D -> H W D", H=H_grid, W=W_grid)
+             base_mask_pe_2d = main_pe_2d[y1:y2, x1:x2, :]
+             base_mask_pe = rearrange(base_mask_pe_2d, "h w D -> (h w) D")
+             
+             # 5. Calculate New PE
+             # probs: [B, N_mask, N_sub+1]
+             
+             match_probs = probs[..., :-1] # [B, N_mask, N_sub]
+             dustbin_probs = probs[..., -1:] # [B, N_mask, 1]
+             
+             # Weighted sum of Sub PEs
+             # [B, N_mask, N_sub] @ [1, N_sub, D] -> [B, N_mask, D]
+             weighted_sub_pe = torch.matmul(match_probs, sub_pe.unsqueeze(0))
+             
+             # Mix
+             # [B, N_mask, D]
+             mixed_pe = weighted_sub_pe + dustbin_probs * base_mask_pe.unsqueeze(0)
+             
+             # 6. Assign back to Main PE
+             # Init with original shared PE, expanded to batch
+             current_pe_batch = full_pe.unsqueeze(0).expand(latents.shape[0], -1, -1).clone()
+             
+             # Update Mask region
+             current_main_pe = current_pe_batch[:, :image_seq_len]
+             current_main_pe_2d = rearrange(current_main_pe, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
+             
+             current_mask_pe_2d = rearrange(mixed_pe, "B (h w) D -> B h w D", h=y2-y1, w=x2-x1)
+             current_main_pe_2d[:, y1:y2, x1:x2, :] = current_mask_pe_2d
+             
+             current_main_pe_flat = rearrange(current_main_pe_2d, "B H W D -> B (H W) D")
+             current_pe_batch[:, :image_seq_len] = current_main_pe_flat
+             
+             # Ensure shape is [B, 1, L, D] for broadcasting in attention
+             current_pe_batch = current_pe_batch.unsqueeze(1)
+             
+             # Update block_rotary
+             block_rotary = (current_pe_batch, txt_freqs)
+        
         text, image = gradient_checkpoint_forward(
             block,
             use_gradient_checkpointing,
@@ -601,7 +822,7 @@ def model_fn_qwen_image(
             image=image,
             text=text,
             temb=conditioning,
-            image_rotary_emb=image_rotary_emb,
+            image_rotary_emb=block_rotary,
             attention_mask=attention_mask,
             enable_fp8_attention=enable_fp8_attention,
         )
@@ -615,8 +836,15 @@ def model_fn_qwen_image(
             image[:, :image_seq_len] = image_slice + controlnet_output
     
     image = dit.norm_out(image, conditioning)
-    image = dit.proj_out(image)
-    image = image[:, :image_seq_len]
+    image_all = dit.proj_out(image)
+    image = image_all[:, :image_seq_len]
     
     latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
+    if noise_len is not None:
+        sub_latents = image_all[:, image_seq_len:noise_len]
+        sub_latents = rearrange(sub_latents, "B (H W) (C P Q) -> B C (H P) (W Q)", H=h_s, W=w_s, P=2, Q=2)
+        return latents, sub_latents
+
+
+
     return latents

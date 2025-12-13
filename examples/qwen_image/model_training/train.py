@@ -1,6 +1,7 @@
 import torch, os, argparse, accelerate
 from PIL import Image
 from diffsynth.core import UnifiedDataset
+from diffsynth.core.data.operators import *
 from diffsynth.pipelines.qwen_image import QwenImagePipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

@@ -29,11 +29,14 @@ def launch_training_task(
         num_epochs = args.num_epochs
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
+        save_resume_each_epoch = not getattr(args, "disable_epoch_resume", False)
+    else:
+        save_resume_each_epoch = True
     
     if learning_rate is None:
         learning_rate = 1.0
     
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=collate_first, num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=collate_fn=lambda x: x[0], num_workers=num_workers)
     
     # 计算总训练步数
     total_steps = len(dataloader) * num_epochs
@@ -80,9 +83,8 @@ def launch_training_task(
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
-                    loss, org_loss = model({}, inputs=data)
-                    back_loss = torch.tensor(0.0, device=loss.device)
-                    sub_loss = torch.tensor(0.0, device=loss.device)
+                    loss, org_loss, back_loss, sub_loss = model({}, inputs=data)
+
                 else:
                     loss, org_loss, back_loss, sub_loss  = model(data)
                 accelerator.backward(loss)
@@ -114,11 +116,12 @@ def launch_training_task(
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
         #save resume state
-        if hasattr(optimizer, "eval"):
-            optimizer.eval()
-        accelerator.save_state('train/resume')
-        if hasattr(optimizer, "train"):
-            optimizer.train()
+        if save_resume_each_epoch:
+            if hasattr(optimizer, "eval"):
+                optimizer.eval()
+            accelerator.save_state('train/resume')
+            if hasattr(optimizer, "train"):
+                optimizer.train()
     model_logger.on_training_end(accelerator, model, save_steps)
 
 

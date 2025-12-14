@@ -103,6 +103,7 @@ def qwen_image_parser():
     parser.add_argument("--processor_path", type=str, default=None, help="Path to the processor. If provided, the processor will be used for image editing.")
     parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name.")
     parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name.")
+    parser.add_argument("--disable_epoch_resume", action="store_true", help="If set, skip saving accelerator state each epoch (no resume checkpoints).")
     return parser
 
 
@@ -111,6 +112,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        log_with="wandb" if args.wandb_project is not None else None,
         kwargs_handlers=[accelerate.DistributedDataParallelKwargs(find_unused_parameters=args.find_unused_parameters)],
     )
     dataset = UnifiedDataset(

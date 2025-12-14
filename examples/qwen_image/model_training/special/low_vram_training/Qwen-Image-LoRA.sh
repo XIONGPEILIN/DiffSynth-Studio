@@ -1,3 +1,7 @@
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4}"
+export WANDB_PROJECT="${WANDB_PROJECT:-qwen-image}"
+export WANDB_NAME="${WANDB_NAME:-Qwen-Image-LoRA-low_vram_training}"
+
 accelerate launch examples/qwen_image/model_training/train.py \
   --dataset_base_path data/example_image_dataset \
   --dataset_metadata_path data/example_image_dataset/metadata.csv \
@@ -15,6 +19,8 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --use_gradient_checkpointing \
   --use_gradient_checkpointing_offload \
   --dataset_num_workers 8 \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters \
   --task "sft:data_process"
 
@@ -34,5 +40,7 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --use_gradient_checkpointing \
   --use_gradient_checkpointing_offload \
   --dataset_num_workers 8 \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters \
   --task "sft:train"

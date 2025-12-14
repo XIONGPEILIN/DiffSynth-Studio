@@ -650,7 +650,7 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
 
 
 def swpe(img_pe, subyx,img_shapes):
-    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
+    # 将子图 PE 覆盖到主图指定区域，让主图继承子图的空间位置信息
     y1, y2, x1, x2 = subyx
     pe = img_pe.clone()
     img1_patch_shape = img_shapes[0]
@@ -661,9 +661,8 @@ def swpe(img_pe, subyx,img_shapes):
     image2_pe = pe[img1_length:img1_length + img2_length, :]
     image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
     image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-    image2_pe = image1_pe[y1:y2, x1:x2, :]
-    image2_pe = image2_pe.reshape(img2_length, -1)
-    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
+    image1_pe[y1:y2, x1:x2, :] = image2_pe  # 把子图 PE 写回主图区域
+    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe.reshape(img2_length, -1)], dim=0)
     return pe
 
 
@@ -743,9 +742,9 @@ def model_fn_qwen_image(
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
 
-    if subyx is not None:
-        # Build swapped PE without per-head expansion; keep 2D [seq, dim]
-        pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
+    # if subyx is not None:
+    #     # Build swapped PE without per-head expansion; keep 2D [seq, dim]
+    #     pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
 
 
     if blockwise_controlnet_conditioning is not None:
@@ -761,70 +760,72 @@ def model_fn_qwen_image(
         block_rotary = (running_img_freqs, txt_freqs)
         
         if sub is not None:
-             # 1. Extract Query (Main Latents @ Mask)
-             # Reshape main image to 2D spatial
-             main_img = image[:, :image_seq_len]
-             H_grid, W_grid = height // 16, width // 16 # Patch Grid Size
-             
-             # image: B (H W) D -> B H W D
-             main_img_2d = rearrange(main_img, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
-             
-             y1, y2, x1, x2 = subyx
-             query_2d = main_img_2d[:, y1:y2, x1:x2, :]
-             query = rearrange(query_2d, "B h w D -> B (h w) D")
-             
-             # 2. Extract Key (Sub Latents)
-             key = image[:, image_seq_len:noise_len] # [B, L_sub, D]
-             
-             # 3. STE
-             with torch.autocast('cuda', dtype=torch.bfloat16):
-                 probs, _ = ste(query, key, layer_idx=block_id)
-             
-             # 4. Extract PEs
-             # image_rotary_emb[0] is [L_total, D] (shared across batch)
-             full_pe = image_rotary_emb[0]
-             sub_pe = full_pe[image_seq_len:noise_len] # [L_sub, D]
-             
-             # Base Main PE @ Mask
-             main_pe = full_pe[:image_seq_len]
-             main_pe_2d = rearrange(main_pe, "(H W) D -> H W D", H=H_grid, W=W_grid)
-             base_mask_pe_2d = main_pe_2d[y1:y2, x1:x2, :]
-             base_mask_pe = rearrange(base_mask_pe_2d, "h w D -> (h w) D")
-             
-             # 5. Calculate New PE
-             # probs: [B, N_mask, N_sub+1]
-             
-             match_probs = probs[..., :-1] # [B, N_mask, N_sub]
-             dustbin_probs = probs[..., -1:] # [B, N_mask, 1]
-             
-             # Weighted sum of Sub PEs
-             # [B, N_mask, N_sub] @ [1, N_sub, D] -> [B, N_mask, D]
-             weighted_sub_pe = torch.matmul(match_probs, sub_pe.unsqueeze(0))
-             
-             # Mix
-             # [B, N_mask, D]
-             mixed_pe = weighted_sub_pe + dustbin_probs * base_mask_pe.unsqueeze(0)
-             
-             # 6. Assign back to Main PE
-             # Init with original shared PE, expanded to batch
-             current_pe_batch = full_pe.unsqueeze(0).expand(latents.shape[0], -1, -1).clone()
-             
-             # Update Mask region
-             current_main_pe = current_pe_batch[:, :image_seq_len]
-             current_main_pe_2d = rearrange(current_main_pe, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
-             
-             current_mask_pe_2d = rearrange(mixed_pe, "B (h w) D -> B h w D", h=y2-y1, w=x2-x1)
-             current_main_pe_2d[:, y1:y2, x1:x2, :] = current_mask_pe_2d
-             
-             current_main_pe_flat = rearrange(current_main_pe_2d, "B H W D -> B (H W) D")
-             current_pe_batch[:, :image_seq_len] = current_main_pe_flat
-             
-             # Ensure shape is [B, 1, L, D] for broadcasting in attention
-             current_pe_batch = current_pe_batch.unsqueeze(1)
-             
-             # Update block_rotary
-             block_rotary = (current_pe_batch, txt_freqs)
-        
+            # 1. Extract Query (Main Latents @ Mask)
+            # Reshape main image to 2D spatial
+            main_img = image[:, :image_seq_len]
+            H_grid, W_grid = height // 16, width // 16 # Patch Grid Size
+
+            # image: B (H W) D -> B H W D
+            main_img_2d = rearrange(main_img, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
+            
+            y1, y2, x1, x2 = subyx
+            query_2d = main_img_2d[:, y1:y2, x1:x2, :]
+            query = rearrange(query_2d, "B h w D -> B (h w) D")
+            
+            # 2. Extract Key (Main Mask Region + Sub Latents)
+            key_main = query  # 主图掩码区域
+            key_sub = image[:, image_seq_len:noise_len]  # 子图
+            key = torch.cat([key_main, key_sub], dim=1)  # [B, N_mask+L_sub, D]
+            
+            # 3. STE
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                probs, _ = ste(query, key, layer_idx=block_id)
+            
+            # 4. Extract PE candidates (force real to avoid complex writes)
+            full_pe = image_rotary_emb[0].real
+            # 主图掩码区域 PE
+            main_pe = full_pe[:image_seq_len]
+            main_pe_2d = rearrange(main_pe, "(H W) D -> H W D", H=H_grid, W=W_grid)
+            base_mask_pe_2d = main_pe_2d[y1:y2, x1:x2, :]
+            base_mask_pe = rearrange(base_mask_pe_2d, "h w D -> (h w) D")
+            # 子图 PE
+            sub_pe = full_pe[image_seq_len:noise_len]
+            # 候选顺序与 key 对齐：先主图掩码，再子图
+            pe_candidates = torch.cat([base_mask_pe, sub_pe], dim=0)  # [N_mask+L_sub, D]
+            
+            # 5. Calculate New PE
+            # probs: [B, N_mask, N_mask+N_sub+1]
+            match_probs = probs[..., :-1] # [B, N_mask, N_mask+N_sub]
+            dustbin_probs = probs[..., -1:] # [B, N_mask, 1]（仍计算但不混入）
+            
+            # Straight‑through top‑1: keep per‑position alignment, allow gradients from soft probs
+            top_idx = match_probs.argmax(dim=-1)  # [B, N_mask]
+            hard_probs = torch.nn.functional.one_hot(top_idx, num_classes=pe_candidates.shape[0]).to(match_probs.dtype)
+            hard_probs = hard_probs + (match_probs - match_probs.detach())  # straight-through
+            
+            pe_batch = pe_candidates.unsqueeze(0)  # [1, N_mask+N_sub, D] (real)
+            mixed_pe = torch.matmul(hard_probs, pe_batch)  # [B, N_mask, D]
+            
+            # 6. Assign back to Main PE
+            # Init with original shared PE, expanded to batch
+            current_pe_batch = full_pe.unsqueeze(0).expand(latents.shape[0], -1, -1).clone()
+            
+            # Update Mask region
+            current_main_pe = current_pe_batch[:, :image_seq_len].clone()
+            current_main_pe_2d = rearrange(current_main_pe, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
+            
+            current_mask_pe_2d = rearrange(mixed_pe, "B (h w) D -> B h w D", h=y2-y1, w=x2-x1)
+            current_main_pe_2d[:, y1:y2, x1:x2, :] = current_mask_pe_2d
+            
+            current_main_pe_flat = rearrange(current_main_pe_2d, "B H W D -> B (H W) D")
+            current_pe_batch[:, :image_seq_len] = current_main_pe_flat
+            
+            # Ensure shape is [B, 1, L, D] for broadcasting in attention
+            current_pe_batch = current_pe_batch.unsqueeze(1)
+            
+            # Update block_rotary
+            block_rotary = (current_pe_batch, txt_freqs)
+
         text, image = gradient_checkpoint_forward(
             block,
             use_gradient_checkpointing,

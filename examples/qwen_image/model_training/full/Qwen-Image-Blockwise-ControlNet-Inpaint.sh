@@ -1,3 +1,7 @@
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4}"
+export WANDB_PROJECT="${WANDB_PROJECT:-qwen-image}"
+export WANDB_NAME="${WANDB_NAME:-Qwen-Image-Blockwise-ControlNet-Inpaint-full}"
+
 accelerate launch --config_file examples/qwen_image/model_training/full/accelerate_config.yaml examples/qwen_image/model_training/train.py \
   --dataset_base_path data/example_image_dataset \
   --dataset_metadata_path data/example_image_dataset/metadata_blockwise_controlnet_inpaint.csv \
@@ -12,6 +16,8 @@ accelerate launch --config_file examples/qwen_image/model_training/full/accelera
   --trainable_models "blockwise_controlnet" \
   --extra_inputs "blockwise_controlnet_image,blockwise_controlnet_inpaint_mask" \
   --use_gradient_checkpointing \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters
 
 # If you want to pre-train a Inpaint Blockwise ControlNet from scratch,

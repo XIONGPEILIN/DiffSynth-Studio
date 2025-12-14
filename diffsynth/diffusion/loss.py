@@ -35,8 +35,9 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
 
     # 5) 权重
+    org_loss = loss.clone()
     loss = loss * pipe.scheduler.training_weight(timestep)
-    return loss
+    return loss, org_loss, back_loss, sub_loss
 
 
 def DirectDistillLoss(pipe: BasePipeline, **inputs):

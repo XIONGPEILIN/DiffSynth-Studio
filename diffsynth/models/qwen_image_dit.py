@@ -406,18 +406,18 @@ class QwenImageTransformerBlock(nn.Module):
 
 
 class STEHead(nn.Module):
-    def __init__(self, dim: int = 3072):
+    def __init__(self, dim: int = 3072, hidden_dim: int = 64):
         super().__init__()
         # Feature Projection (Trainable)
-        self.proj_q = nn.Linear(dim, dim) # Source (Main Masked Region)
-        self.proj_k = nn.Linear(dim, dim) # Target (Sub Image)
+        self.proj_q = nn.Linear(dim, hidden_dim) # Source (Main Masked Region) -> compact 64d
+        self.proj_k = nn.Linear(dim, hidden_dim) # Target (Sub Image) -> compact 64d
         
         # Normalization
-        self.norm_q = RMSNorm(dim, eps=1e-6)
-        self.norm_k = RMSNorm(dim, eps=1e-6)
+        self.norm_q = RMSNorm(hidden_dim, eps=1e-6)
+        self.norm_k = RMSNorm(hidden_dim, eps=1e-6)
         
         # Learnable Dustbin
-        self.dustbin = nn.Parameter(torch.randn(1, dim))
+        self.dustbin = nn.Parameter(torch.randn(1, hidden_dim))
         
     def forward(self, query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
         """
@@ -439,7 +439,8 @@ class STEHead(nn.Module):
         B, M, C = k.shape
         # Apply norm to dustbin as well
         dustbin = self.norm_k(self.dustbin) # [1, C]
-        dustbin = dustbin.unsqueeze(0).expand(B, 1, C) # [B, 1, C]
+        # Use contiguous copy to avoid DDP grad stride warnings from expand views
+        dustbin = dustbin.unsqueeze(0).expand(B, 1, C).contiguous() # [B, 1, C]
         k_augmented = torch.cat([k, dustbin], dim=1) # [B, M+1, C]
         
         # 4. Correlation Computation
@@ -460,11 +461,12 @@ class STE(nn.Module):
         self,
         dim_in: int = 3072,
         num_layers: int = 60,
+        ste_dim: int = 64,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.heads = nn.ModuleList([
-            STEHead(dim=dim_in)
+            STEHead(dim=dim_in, hidden_dim=ste_dim)
             for _ in range(num_layers)
         ])
         

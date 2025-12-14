@@ -1,3 +1,7 @@
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4}"
+export WANDB_PROJECT="${WANDB_PROJECT:-qwen-image}"
+export WANDB_NAME="${WANDB_NAME:-Qwen-Image-LoRA-differential_training}"
+
 # This script is provided as an example only.
 # Please manually replace the two datasets:
 # the first training dataset should contain content you do not want to generate,
@@ -18,6 +22,8 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --lora_rank 32 \
   --use_gradient_checkpointing \
   --dataset_num_workers 8 \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters
 
 accelerate launch examples/qwen_image/model_training/train.py \
@@ -35,6 +41,8 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --lora_rank 32 \
   --use_gradient_checkpointing \
   --dataset_num_workers 8 \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters \
   --preset_lora_path "./models/train/Qwen-Image-LoRA-deterministic/epoch-4.safetensors" \
   --preset_lora_model "dit"

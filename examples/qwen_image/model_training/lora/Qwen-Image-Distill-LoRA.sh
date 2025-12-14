@@ -1,3 +1,7 @@
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1,2,3,4}"
+export WANDB_PROJECT="${WANDB_PROJECT:-qwen-image}"
+export WANDB_NAME="${WANDB_NAME:-Qwen-Image-Distill-LoRA-lora}"
+
 accelerate launch examples/qwen_image/model_training/train.py \
   --dataset_base_path data/example_image_dataset \
   --dataset_metadata_path data/example_image_dataset/metadata_distill_qwen_image.csv \
@@ -16,6 +20,8 @@ accelerate launch examples/qwen_image/model_training/train.py \
   --lora_rank 32 \
   --use_gradient_checkpointing \
   --dataset_num_workers 8 \
+  --wandb_project "${WANDB_PROJECT}" \
+  --wandb_name "${WANDB_NAME}" \
   --find_unused_parameters \
   --task direct_distill
 

@@ -36,7 +36,7 @@ def launch_training_task(
     if learning_rate is None:
         learning_rate = 1.0
     
-    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=collate_fn=lambda x: x[0], num_workers=num_workers)
+    dataloader = torch.utils.data.DataLoader(dataset, shuffle=True, collate_fn=lambda x: x[0], num_workers=num_workers)
     
     # 计算总训练步数
     total_steps = len(dataloader) * num_epochs

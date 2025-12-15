@@ -1,4 +1,5 @@
 import torch, math
+from pathlib import Path
 from PIL import Image
 from typing import Union
 from tqdm import tqdm
@@ -124,6 +125,7 @@ class QwenImagePipeline(BasePipeline):
         # Progress bar
         progress_bar_cmd = tqdm,
         back_mask: Image.Image = None,
+        pe_mask_dir: str = None,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
@@ -147,7 +149,8 @@ class QwenImagePipeline(BasePipeline):
             "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative,
             "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize, "edit_rope_interpolation": edit_rope_interpolation, 
             "context_image": context_image,
-            "back_mask": back_mask
+            "back_mask": back_mask,
+            "pe_mask_dir": pe_mask_dir,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -691,6 +694,7 @@ def model_fn_qwen_image(
     edit_rope_interpolation=False,
     sub_latents=None,
     subyx=None,
+    pe_mask_dir=None,
     **kwargs
 ):
     img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
@@ -742,9 +746,9 @@ def model_fn_qwen_image(
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
 
-    # if subyx is not None:
-    #     # Build swapped PE without per-head expansion; keep 2D [seq, dim]
-    #     pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
+    if subyx is not None:
+        # Build swapped PE without per-head expansion; keep 2D [seq, dim]
+        pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
 
 
     if blockwise_controlnet_conditioning is not None:
@@ -758,74 +762,33 @@ def model_fn_qwen_image(
 
     for block_id, block in enumerate(dit.transformer_blocks):
         block_rotary = (running_img_freqs, txt_freqs)
-        
         if sub is not None:
-            # 1. Extract Query (Main Latents @ Mask)
-            # Reshape main image to 2D spatial
-            main_img = image[:, :image_seq_len]
-            H_grid, W_grid = height // 16, width // 16 # Patch Grid Size
-
-            # image: B (H W) D -> B H W D
-            main_img_2d = rearrange(main_img, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
-            
-            y1, y2, x1, x2 = subyx
-            query_2d = main_img_2d[:, y1:y2, x1:x2, :]
-            query = rearrange(query_2d, "B h w D -> B (h w) D")
-            
-            # 2. Extract Key (Main Mask Region + Sub Latents)
-            key_main = query  # 主图掩码区域
-            key_sub = image[:, image_seq_len:noise_len]  # 子图
-            key = torch.cat([key_main, key_sub], dim=1)  # [B, N_mask+L_sub, D]
-            
-            # 3. STE
+            # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                probs, _ = ste(query, key, layer_idx=block_id)
-            
-            # 4. Extract PE candidates (force real to avoid complex writes)
-            full_pe = image_rotary_emb[0].real
-            # 主图掩码区域 PE
-            main_pe = full_pe[:image_seq_len]
-            main_pe_2d = rearrange(main_pe, "(H W) D -> H W D", H=H_grid, W=W_grid)
-            base_mask_pe_2d = main_pe_2d[y1:y2, x1:x2, :]
-            base_mask_pe = rearrange(base_mask_pe_2d, "h w D -> (h w) D")
-            # 子图 PE
-            sub_pe = full_pe[image_seq_len:noise_len]
-            # 候选顺序与 key 对齐：先主图掩码，再子图
-            pe_candidates = torch.cat([base_mask_pe, sub_pe], dim=0)  # [N_mask+L_sub, D]
-            
-            # 5. Calculate New PE
-            # probs: [B, N_mask, N_mask+N_sub+1]
-            match_probs = probs[..., :-1] # [B, N_mask, N_mask+N_sub]
-            dustbin_probs = probs[..., -1:] # [B, N_mask, 1]（仍计算但不混入）
-            
-            # Straight‑through top‑1: keep per‑position alignment, allow gradients from soft probs
-            top_idx = match_probs.argmax(dim=-1)  # [B, N_mask]
-            hard_probs = torch.nn.functional.one_hot(top_idx, num_classes=pe_candidates.shape[0]).to(match_probs.dtype)
-            hard_probs = hard_probs + (match_probs - match_probs.detach())  # straight-through
-            
-            pe_batch = pe_candidates.unsqueeze(0)  # [1, N_mask+N_sub, D] (real)
-            mixed_pe = torch.matmul(hard_probs, pe_batch)  # [B, N_mask, D]
-            
-            # 6. Assign back to Main PE
-            # Init with original shared PE, expanded to batch
-            current_pe_batch = full_pe.unsqueeze(0).expand(latents.shape[0], -1, -1).clone()
-            
-            # Update Mask region
-            current_main_pe = current_pe_batch[:, :image_seq_len].clone()
-            current_main_pe_2d = rearrange(current_main_pe, "B (H W) D -> B H W D", H=H_grid, W=W_grid)
-            
-            current_mask_pe_2d = rearrange(mixed_pe, "B (h w) D -> B h w D", h=y2-y1, w=x2-x1)
-            current_main_pe_2d[:, y1:y2, x1:x2, :] = current_mask_pe_2d
-            
-            current_main_pe_flat = rearrange(current_main_pe_2d, "B H W D -> B (H W) D")
-            current_pe_batch[:, :image_seq_len] = current_main_pe_flat
-            
-            # Ensure shape is [B, 1, L, D] for broadcasting in attention
-            current_pe_batch = current_pe_batch.unsqueeze(1)
-            
-            # Update block_rotary
-            block_rotary = (current_pe_batch, txt_freqs)
+                token_gate, _ = ste(image, layer_idx=block_id)  
+            token_gate = token_gate[:,:pe_sw.shape[0],:]
 
+
+            # # save token_gate mask for sub-region
+            # tmp_mask = token_gate[0][image_seq_len:noise_len,0].clone()
+            # # Save as image
+            # mask_2d = tmp_mask.view(h_s, w_s).float().cpu().numpy()
+            # mask_img = Image.fromarray((mask_2d * 255).astype(np.uint8), mode='L')
+            # mask_img.save(f"mask3/mask_timestep_{timestep.item()}_block_{block_id}.png")
+            
+            if token_gate.dim() == 1:
+                token_gate = token_gate.unsqueeze(-1)
+            if token_gate.shape[-1] == 1:
+                token_gate = token_gate[0].expand(-1, pe_sw.shape[1])  # [L, 64]
+            # 与未展开的二维 RoPE 逐维混合（复数频率×实数门控广播）
+            base_img_freqs = image_rotary_emb[0][:pe_sw.shape[0], :]  # [L, 64]
+            pe = pe_sw * (1 - token_gate) + base_img_freqs * token_gate  # [L, 64]
+
+            updated_img_freqs = running_img_freqs.clone()  # [S, D]
+            updated_img_freqs[:pe.shape[0], :] = pe
+            block_rotary = (updated_img_freqs, txt_freqs)
+            running_img_freqs = updated_img_freqs
+        
         text, image = gradient_checkpoint_forward(
             block,
             use_gradient_checkpointing,

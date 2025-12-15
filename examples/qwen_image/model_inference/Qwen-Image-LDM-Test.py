@@ -60,7 +60,14 @@ def load_ste_and_lora(pipe, ckpt_path: Path) -> Tuple[int, int]:
     state = load_file(str(ckpt_path), device="cpu")
 
     ste_prefix = "pipe.ste."
-    ste_state = {k[len(ste_prefix):]: v for k, v in state.items() if k.startswith(ste_prefix)}
+    ste_state = {}
+    for k, v in state.items():
+        if k.startswith(ste_prefix):
+            name = k[len(ste_prefix):]
+            if name.endswith("dustbin"):
+                # dustbin removed in current STE; skip old weights
+                continue
+            ste_state[name] = v
     if ste_state:
         pipe.ste.load_state_dict(ste_state, strict=False)
 
@@ -127,6 +134,8 @@ def main():
         ldm_bridge=True,
         cfg_scale=4.0,
         seed=0,
+        # Enable PE mask saving for debugging
+        pe_mask_dir=repo_root / "pe_masks",
     )
 
     out_path = repo_root / "ldm_bridge_output.png"

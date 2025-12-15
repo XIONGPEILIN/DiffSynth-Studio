@@ -988,6 +988,7 @@ def model_fn_qwen_image(
             # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 token_gate, _ = ste(image, layer_idx=block_id)  
+            
 
 
             # # save token_gate mask for sub-region

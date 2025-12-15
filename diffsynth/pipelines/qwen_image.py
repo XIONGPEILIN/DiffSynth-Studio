@@ -160,26 +160,13 @@ class QwenImagePipeline(BasePipeline):
         models = {name: getattr(self, name) for name in self.in_iteration_models}
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
-            
-            # Inference
-            output_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
-            if isinstance(output_posi, tuple):
-                noise_pred_posi, sub_noise_pred_posi = output_posi
-            else:
-                noise_pred_posi, sub_noise_pred_posi = output_posi, None
 
+            # Inference
+            noise_pred_posi, sub_noise_pred_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
             if cfg_scale != 1.0:
-                output_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
-                if isinstance(output_nega, tuple):
-                    noise_pred_nega, sub_noise_pred_nega = output_nega
-                else:
-                    noise_pred_nega, sub_noise_pred_nega = output_nega, None
-                
+                noise_pred_nega, sub_noise_pred_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
-                if sub_noise_pred_posi is not None and sub_noise_pred_nega is not None:
-                    sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
-                else:
-                    sub_noise_pred = None
+                sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
             else:
                 noise_pred = noise_pred_posi
                 sub_noise_pred = sub_noise_pred_posi
@@ -187,19 +174,14 @@ class QwenImagePipeline(BasePipeline):
             # Scheduler
             step_kwargs = {k: v for k, v in inputs_shared.items() if k not in ["latents", "sub_latents"]}
             inputs_shared["latents"] = self.step(self.scheduler, latents=inputs_shared["latents"], progress_id=progress_id, noise_pred=noise_pred, **step_kwargs)
-            if sub_noise_pred is not None and "sub_latents" in inputs_shared and inputs_shared["sub_latents"] is not None:
-                inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
-        
+            inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
+
         # Decode
         self.load_models_to_device(['vae'])
         image = self.vae.decode(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        sub_image = self.vae.decode(inputs_shared["sub_latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
         image = self.vae_output_to_image(image)
-        
-        sub_image = None
-        if "sub_latents" in inputs_shared and inputs_shared["sub_latents"] is not None:
-            sub_image = self.vae.decode(inputs_shared["sub_latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-            sub_image = self.vae_output_to_image(sub_image)
-            
+        sub_image = self.vae_output_to_image(sub_image)
         self.load_models_to_device([])
 
         return image, sub_image
@@ -311,37 +293,6 @@ class QwenImageUnit_MaskGuidedNoise(PipelineUnit):
 
         return {"sub_noise": patch, "subyx": (y1, y2, x1, x2)}
 
-
-class QwenImageUnit_SubInputImageEmbedder(PipelineUnit):
-    def __init__(self):
-        super().__init__(
-            input_params=("ref_gt", "sub_noise", "tiled", "tile_size", "tile_stride"),
-            onload_model_names=("vae",)
-        )
-
-    def process(self, pipe: QwenImagePipeline, ref_gt, sub_noise, tiled, tile_size, tile_stride):
-        if ref_gt is None:
-            return {"sub_latents": sub_noise, "sub_input_latents": None}
-        pipe.load_models_to_device(['vae'])
-
-        if isinstance(ref_gt, list):
-            if len(ref_gt) == 0:
-                return {"sub_latents": sub_noise, "sub_input_latents": None}
-            ref_gt = ref_gt[0]
-
-        if isinstance(ref_gt, Image.Image) and ref_gt.mode != "RGB":
-            ref_gt = ref_gt.convert("RGB")
-
-        image = pipe.preprocess_image(ref_gt).to(device=pipe.device, dtype=pipe.torch_dtype)
-        input_latents = pipe.vae.encode(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        
-        if pipe.scheduler.training:
-            return {"sub_latents": sub_noise, "sub_input_latents": input_latents}
-        else:
-            latents = pipe.scheduler.add_noise(input_latents, sub_noise, timestep=pipe.scheduler.timesteps[0])
-            return {"sub_latents": latents, "sub_input_latents": input_latents}
-
-
 class QwenImageUnit_InputImageEmbedder(PipelineUnit):
     def __init__(self):
         super().__init__(
@@ -361,7 +312,25 @@ class QwenImageUnit_InputImageEmbedder(PipelineUnit):
         else:
             latents = pipe.scheduler.add_noise(input_latents, noise, timestep=pipe.scheduler.timesteps[0])
             return {"latents": latents, "input_latents": input_latents}
+class QwenImageUnit_SubInputImageEmbedder(PipelineUnit):
+    def __init__(self):
+        super().__init__(
+            input_params=("ref_gt", "sub_noise", "tiled", "tile_size", "tile_stride"),
+            output_params=("sub_latents", "sub_input_latents"),
+            onload_model_names=("vae",)
+        )
 
+    def process(self, pipe: QwenImagePipeline, ref_gt, sub_noise, tiled, tile_size, tile_stride):
+        if ref_gt is None:
+            return {"sub_latents": sub_noise, "sub_input_latents": None}
+        pipe.load_models_to_device(['vae'])
+        image = pipe.preprocess_image(ref_gt).to(device=pipe.device, dtype=pipe.torch_dtype)
+        input_latents = pipe.vae.encode(image, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        if pipe.scheduler.training:
+            return {"sub_latents": sub_noise, "sub_input_latents": input_latents}
+        else:
+            latents = pipe.scheduler.add_noise(input_latents, sub_noise, timestep=pipe.scheduler.timesteps[0])
+            return {"sub_latents": latents, "sub_input_latents": input_latents}
 
 
 class QwenImageUnit_Inpaint(PipelineUnit):
@@ -652,8 +621,9 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
         return {"context_latents": context_latents}
 
 
+
 def swpe(img_pe, subyx,img_shapes):
-    # 将子图 PE 覆盖到主图指定区域，让主图继承子图的空间位置信息
+    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
     y1, y2, x1, x2 = subyx
     pe = img_pe.clone()
     img1_patch_shape = img_shapes[0]
@@ -664,8 +634,9 @@ def swpe(img_pe, subyx,img_shapes):
     image2_pe = pe[img1_length:img1_length + img2_length, :]
     image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
     image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-    image1_pe[y1:y2, x1:x2, :] = image2_pe  # 把子图 PE 写回主图区域
-    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe.reshape(img2_length, -1)], dim=0)
+    image2_pe = image1_pe[y1:y2, x1:x2, :]
+    image2_pe = image2_pe.reshape(img2_length, -1)
+    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
     return pe
 
 
@@ -767,7 +738,6 @@ def model_fn_qwen_image(
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 token_gate, _ = ste(image, layer_idx=block_id)  
             token_gate = token_gate[:,:pe_sw.shape[0],:]
-
 
             # # save token_gate mask for sub-region
             # tmp_mask = token_gate[0][image_seq_len:noise_len,0].clone()

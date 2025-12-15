@@ -6,9 +6,7 @@ from tqdm import tqdm
 from einops import rearrange
 import numpy as np
 
-from ..diffusion import FlowMatchScheduler
-from ..core import ModelConfig, gradient_checkpoint_forward
-from ..diffusion.base_pipeline import BasePipeline, PipelineUnit, ControlNetInput
+from ..models import ModelManager, load_state_dict
 from ..models.qwen_image_dit import QwenImageDiT, STE
 from ..models.qwen_image_text_encoder import QwenImageTextEncoder
 from ..models.qwen_image_vae import QwenImageVAE
@@ -871,7 +869,7 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
 
 
 def swpe(img_pe, subyx,img_shapes):
-    # 将子图 PE 覆盖到主图指定区域，让主图继承子图的空间位置信息
+    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
     y1, y2, x1, x2 = subyx
     pe = img_pe.clone()
     img1_patch_shape = img_shapes[0]
@@ -882,8 +880,9 @@ def swpe(img_pe, subyx,img_shapes):
     image2_pe = pe[img1_length:img1_length + img2_length, :]
     image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
     image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-    image1_pe[y1:y2, x1:x2, :] = image2_pe  # 把子图 PE 写回主图区域
-    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe.reshape(img2_length, -1)], dim=0)
+    image2_pe = image1_pe[y1:y2, x1:x2, :]
+    image2_pe = image2_pe.reshape(img2_length, -1)
+    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
     return pe
     
 
@@ -988,8 +987,7 @@ def model_fn_qwen_image(
             # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 token_gate, _ = ste(image, layer_idx=block_id)  
-            
-
+            token_gate = token_gate[:,:pe_sw.shape[0],:]
 
             # # save token_gate mask for sub-region
             # tmp_mask = token_gate[0][image_seq_len:noise_len,0].clone()

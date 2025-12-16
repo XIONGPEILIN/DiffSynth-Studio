@@ -54,15 +54,6 @@ def add_lora_config(parser: argparse.ArgumentParser):
     parser.add_argument("--preset_lora_model", type=str, default=None, help="Which model the preset LoRA is fused to.")
     return parser
 
-def add_ppsf_config(parser: argparse.ArgumentParser):
-    # PPSF 扩展参数（与 Schedule-Free 优化器相关）
-    parser.add_argument("--use_speed", action="store_false", help="[PPSF] 开启 SPEED（扩散/LoRA 不建议）")
-    parser.add_argument("--prodigy_steps", type=int, default=-1, help="[PPSF] 仅前 N 步自适应，之后冻结；-1=自动(20%，≤3000)")
-    parser.add_argument("--d0", type=float, default=1e-6, help="[PPSF] 初始 d")
-    parser.add_argument("--beta1", type=float, default=0.95, help="[PPSF] beta1")
-    parser.add_argument("--beta2", type=float, default=0.99, help="[PPSF] beta2")
-    return parser
-
 def add_gradient_config(parser: argparse.ArgumentParser):
     parser.add_argument("--use_gradient_checkpointing", default=False, action="store_true", help="Whether to use gradient checkpointing.")
     parser.add_argument("--use_gradient_checkpointing_offload", default=False, action="store_true", help="Whether to offload gradient checkpointing to CPU memory.")
@@ -75,6 +66,5 @@ def add_general_config(parser: argparse.ArgumentParser):
     parser = add_training_config(parser)
     parser = add_output_config(parser)
     parser = add_lora_config(parser)
-    parser = add_ppsf_config(parser)
     parser = add_gradient_config(parser)
     return parser

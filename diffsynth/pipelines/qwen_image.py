@@ -89,7 +89,7 @@ class QwenImagePipeline(BasePipeline):
         # Prompt
         prompt: str,
         negative_prompt: str = "",
-        cfg_scale: float = 4.0,
+        cfg_scale: float = 1.0,
         # Image
         input_image: Image.Image = None,
         denoising_strength: float = 1.0,
@@ -114,7 +114,7 @@ class QwenImagePipeline(BasePipeline):
         eligen_enable_on_negative: bool = False,
         # Qwen-Image-Edit
         edit_image: Image.Image = None,
-        edit_image_auto_resize: bool = True,
+        edit_image_auto_resize: bool = False,
         edit_rope_interpolation: bool = False,
         # In-context control
         context_image: Image.Image = None,

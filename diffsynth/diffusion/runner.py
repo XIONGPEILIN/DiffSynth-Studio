@@ -46,25 +46,8 @@ def launch_training_task(
     if wandb_project is not None:
         accelerator.init_trackers(project_name=wandb_project, config=vars(args), init_kwargs={"wandb": {"name": wandb_name}})
     
-    # -------- 构建更稳健的 PPSF 优化器 --------
-    auto_prodigy_steps = min(3000, max(0, int(total_steps * 0.2))) or None  # 前20%，最多3000
-    beta1 = getattr(args, "beta1", 0.95)
-    beta2 = getattr(args, "beta2", 0.99)
-    use_speed = getattr(args, "use_speed", False)
-    prodigy_steps = getattr(args, "prodigy_steps", -1)
-    prodigy_steps = (None if prodigy_steps in (None, 0, -1) else int(prodigy_steps)) or auto_prodigy_steps
-    d0 = getattr(args, "d0", 1e-6)
-
-    def _build_ppsf(params):
-        base = dict(lr=learning_rate, weight_decay=weight_decay, use_schedulefree=True)
-        extras = dict(betas=(beta1, beta2), use_speed=use_speed, prodigy_steps=prodigy_steps, d0=d0, use_bias_correction=True, safeguard_warmup=True)
-        sig = inspect.signature(ProdigyPlusScheduleFree.__init__)
-        allowed = set(sig.parameters.keys())
-        kw = {k: v for k, v in {**base, **extras}.items() if k in allowed and v is not None}
-        return ProdigyPlusScheduleFree(params, **kw)
-
-    optimizer = _build_ppsf(model.trainable_modules())
-    print("Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0, use_speed=", use_speed, ", prodigy_steps=", prodigy_steps, ")")
+    optimizer = ProdigyPlusScheduleFree(model.trainable_modules(),betas=(0.95, 0.99))
+    print("Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0,betas=(0.95, 0.99)")
 
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
     if hasattr(optimizer, "train"):

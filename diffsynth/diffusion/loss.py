@@ -23,6 +23,9 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     # 3) 前向
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
     model_out = pipe.model_fn(**models, **inputs, timestep=timestep)
+    sub_loss = 0
+    back_loss = 0
+
 
     # 4) 计算 loss（兼容有/无 sub）
     if has_sub:

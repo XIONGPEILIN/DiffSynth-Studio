@@ -50,20 +50,7 @@ def launch_training_task(
 
     
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
-    torch.cuda.empty_cache()
-    # Check and load resume checkpoint
-    resume_path = args.resume_from_checkpoint
-    if os.path.exists(resume_path) and os.path.isdir(resume_path):
-        checkpoint_files = os.listdir(resume_path)
-        if checkpoint_files:
-            print(f"Found resume checkpoint at {resume_path}, loading...")
-            accelerator.load_state(resume_path)
-            print("Resume checkpoint loaded successfully!")
-        else:
-            print(f"Resume path exists but is empty: {resume_path}")
-    else:
-        print(f"No resume checkpoint found at {resume_path}, starting from scratch")
-        
+
     
     resume_path = os.path.join(args.output_path, "accelerator_state")
     os.makedirs(resume_path, exist_ok=True)

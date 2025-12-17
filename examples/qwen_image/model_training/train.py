@@ -22,6 +22,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         offload_models=None,
         device="cpu",
         task="sft",
+        cfg_drop_prob=0.0,
     ):
         super().__init__()
         # Load models
@@ -45,6 +46,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.fp8_models = fp8_models
         self.task = task
+        self.cfg_drop_prob = cfg_drop_prob
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
@@ -55,7 +57,14 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         }
         
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
+        # CFG training: randomly drop prompt
+        import random
+        if self.training and random.random() < self.cfg_drop_prob:
+            prompt = ""
+        else:
+            prompt = data["prompt"]
+        
+        inputs_posi = {"prompt": prompt}
         inputs_nega = {"negative_prompt": ""}
         inputs_shared = {
             # Assume you are using this pipeline for inference,
@@ -104,6 +113,8 @@ def qwen_image_parser():
     parser.add_argument("--wandb_project", type=str, default=None, help="Wandb project name.")
     parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name.")
     parser.add_argument("--disable_epoch_resume", action="store_true", help="If set, skip saving accelerator state each epoch (no resume checkpoints).")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to resume checkpoint. If provided, training will resume from this checkpoint.")
+    parser.add_argument("--cfg_drop_prob", type=float, default=0.0, help="Probability of dropping prompt for CFG training. Set to 0.1 for standard CFG training.")
     return parser
 
 
@@ -151,6 +162,7 @@ if __name__ == "__main__":
         offload_models=args.offload_models,
         task=args.task,
         device=accelerator.device,
+        cfg_drop_prob=args.cfg_drop_prob,
     )
     model_logger = ModelLogger(
         args.output_path,

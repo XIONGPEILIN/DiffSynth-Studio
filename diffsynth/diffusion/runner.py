@@ -30,8 +30,10 @@ def launch_training_task(
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
         save_resume_each_epoch = not getattr(args, "disable_epoch_resume", False)
+        resume_checkpoint_path = getattr(args, "resume_from_checkpoint", None)
     else:
         save_resume_each_epoch = True
+        resume_checkpoint_path = None
     
     if learning_rate is None:
         learning_rate = 1.0
@@ -53,7 +55,22 @@ def launch_training_task(
     if hasattr(optimizer, "train"):
         optimizer.train()
     
-
+    # Check and load resume checkpoint
+    if resume_checkpoint_path is not None:
+        if os.path.exists(resume_checkpoint_path) and os.path.isdir(resume_checkpoint_path):
+            checkpoint_files = os.listdir(resume_checkpoint_path)
+            if checkpoint_files:
+                print(f"Found resume checkpoint at {resume_checkpoint_path}, loading...")
+                accelerator.load_state(resume_checkpoint_path)
+                if hasattr(optimizer, "train"):
+                    optimizer.train()
+                print("Resume checkpoint loaded successfully!")
+            else:
+                print(f"Warning: Resume path exists but is empty: {resume_checkpoint_path}")
+        else:
+            print(f"Warning: Resume checkpoint path not found: {resume_checkpoint_path}")
+    else:
+        print("No resume checkpoint specified, starting from scratch")
     
     resume_path = os.path.join(args.output_path, "accelerator_state")
     os.makedirs(resume_path, exist_ok=True)

@@ -43,6 +43,23 @@ def add_output_config(parser: argparse.ArgumentParser):
     parser.add_argument("--output_path", type=str, default="./models", help="Output save path.")
     parser.add_argument("--remove_prefix_in_ckpt", type=str, default="pipe.dit.", help="Remove prefix in ckpt.")
     parser.add_argument("--save_steps", type=int, default=None, help="Number of checkpoint saving invervals. If None, checkpoints will be saved every epoch.")
+    parser.add_argument(
+        "--resume_state_path",
+        type=str,
+        default=None,
+        help="Path to an Accelerate `save_state` directory to resume from.",
+    )
+    parser.add_argument(
+        "--resume_epoch",
+        type=int,
+        default=None,
+        help="Resume from `output_path/accelerator_state/epoch-{N}` (N is 1-based; saved after completing epoch N).",
+    )
+    parser.add_argument(
+        "--resume_latest",
+        action="store_true",
+        help="Resume from the epoch recorded in `output_path/accelerator_state/latest.txt` (written after each saved epoch).",
+    )
     return parser
 
 def add_lora_config(parser: argparse.ArgumentParser):

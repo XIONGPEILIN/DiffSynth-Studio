@@ -5,6 +5,7 @@ from typing import Union
 from tqdm import tqdm
 from einops import rearrange
 import numpy as np
+from math import prod
 
 from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
@@ -118,6 +119,8 @@ class QwenImagePipeline(BasePipeline):
         edit_image: Image.Image = None,
         edit_image_auto_resize: bool = False,
         edit_rope_interpolation: bool = False,
+        # Qwen-Image-Edit-2511
+        zero_cond_t: bool = False,
         # In-context control
         context_image: Image.Image = None,
         # Tile
@@ -151,6 +154,7 @@ class QwenImagePipeline(BasePipeline):
             "eligen_entity_prompts": eligen_entity_prompts, "eligen_entity_masks": eligen_entity_masks, "eligen_enable_on_negative": eligen_enable_on_negative,
             "edit_image": edit_image, "edit_image_auto_resize": edit_image_auto_resize, "edit_rope_interpolation": edit_rope_interpolation, 
             "context_image": context_image,
+            "zero_cond_t": zero_cond_t,
             "back_mask": back_mask,
             "pe_mask_dir": pe_mask_dir,
         }
@@ -701,9 +705,9 @@ def model_fn_qwen_image(
     edit_latents=None,
     context_latents=None,
     enable_fp8_attention=False,
-    use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
     edit_rope_interpolation=False,
+    zero_cond_t=False,
     sub_latents=None,
     subyx=None,
     pe_mask_dir=None,
@@ -743,6 +747,15 @@ def model_fn_qwen_image(
         image = torch.cat([image] + edit_image, dim=1)
 
     image = dit.img_in(image)
+    if zero_cond_t:
+        timestep = torch.cat([timestep, timestep * 0], dim=0)
+        modulate_index = torch.tensor(
+            [[0] * prod(sample[0]) + [1] * sum([prod(s) for s in sample[1:]]) for sample in [img_shapes]],
+            device=timestep.device,
+            dtype=torch.int,
+        )
+    else:
+        modulate_index = None
     conditioning = dit.time_text_embed(timestep, image.dtype)
 
     if entity_prompt_emb is not None:
@@ -810,6 +823,7 @@ def model_fn_qwen_image(
             image_rotary_emb=block_rotary,
             attention_mask=attention_mask,
             enable_fp8_attention=enable_fp8_attention,
+            modulate_index=modulate_index,
         )
         if blockwise_controlnet_conditioning is not None:
             image_slice = image[:, :image_seq_len].clone()
@@ -820,6 +834,8 @@ def model_fn_qwen_image(
             )
             image[:, :image_seq_len] = image_slice + controlnet_output
     
+    if zero_cond_t:
+        conditioning = conditioning.chunk(2, dim=0)[0]
     image = dit.norm_out(image, conditioning)
     image_all = dit.proj_out(image)
     image = image_all[:, :image_seq_len]

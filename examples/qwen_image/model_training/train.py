@@ -23,6 +23,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         device="cpu",
         task="sft",
         cfg_drop_prob=0.0,
+        zero_cond_t=False,
     ):
         super().__init__()
         # Load models
@@ -47,6 +48,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         self.fp8_models = fp8_models
         self.task = task
         self.cfg_drop_prob = cfg_drop_prob
+        self.zero_cond_t = zero_cond_t
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
@@ -72,6 +74,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
             "use_gradient_checkpointing": self.use_gradient_checkpointing,
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
             "edit_image_auto_resize": True,
+            "zero_cond_t": self.zero_cond_t,
         }
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
 
@@ -117,6 +120,7 @@ def qwen_image_parser():
     parser.add_argument("--disable_epoch_resume", action="store_true", help="If set, skip saving accelerator state each epoch (no resume checkpoints).")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to resume checkpoint. If provided, training will resume from this checkpoint.")
     parser.add_argument("--cfg_drop_prob", type=float, default=0.0, help="Probability of dropping the text condition (CFG training).")
+    parser.add_argument("--zero_cond_t", default=False, action="store_true", help="A special parameter introduced by Qwen-Image-Edit-2511. Please enable it for this model.")
     return parser
 
 
@@ -165,6 +169,7 @@ if __name__ == "__main__":
         task=args.task,
         device=accelerator.device,
         cfg_drop_prob=args.cfg_drop_prob,
+        zero_cond_t=args.zero_cond_t,
     )
     model_logger = ModelLogger(
         args.output_path,

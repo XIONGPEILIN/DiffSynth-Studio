@@ -172,18 +172,6 @@ class DiffusionTrainingModule(torch.nn.Module):
             )
             if lora_checkpoint is not None:
                 state_dict = load_state_dict(lora_checkpoint)
-
-                # Load STE weights
-                ste_prefix = "pipe.ste."
-                ste_state = {k[len(ste_prefix):]: v for k, v in state_dict.items() if k.startswith(ste_prefix)}
-                if ste_state:
-                    if hasattr(pipe, 'ste') and pipe.ste is not None:
-                        load_result = pipe.ste.load_state_dict(ste_state, strict=False)
-                        print(f"STE weights loaded from {lora_checkpoint}: {len(ste_state)} keys.")
-                        if len(load_result[1]) > 0:
-                            print(f"Warning, STE key mismatch! Unexpected keys in checkpoint: {load_result[1]}")
-                    else:
-                        print("Warning: STE weights found in checkpoint, but no `pipe.ste` module to load them into.")
                 
                 # Load LoRA weights
                 lora_state = {k: v for k, v in state_dict.items() if "lora_" in k}

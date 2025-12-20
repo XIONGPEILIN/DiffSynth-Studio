@@ -10,7 +10,7 @@ from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit, ControlNetInput
 
-from ..models.qwen_image_dit import QwenImageDiT, STE
+from ..models.qwen_image_dit import QwenImageDiT
 from ..models.qwen_image_text_encoder import QwenImageTextEncoder
 from ..models.qwen_image_vae import QwenImageVAE
 from ..models.qwen_image_controlnet import QwenImageBlockWiseControlNet
@@ -32,7 +32,7 @@ class QwenImagePipeline(BasePipeline):
         self.blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None
         self.tokenizer: Qwen2Tokenizer = None
         self.processor: Qwen2VLProcessor = None
-        self.in_iteration_models = ("dit", "blockwise_controlnet", "ste")
+        self.in_iteration_models = ("dit", "blockwise_controlnet")
         self.units = [
             QwenImageUnit_ShapeChecker(),
             QwenImageUnit_NoiseInitializer(),
@@ -48,8 +48,6 @@ class QwenImagePipeline(BasePipeline):
             QwenImageUnit_BlockwiseControlNet(),
         ]
         self.model_fn = model_fn_qwen_image
-        self.ste = STE()
-        self.ste = self.ste.to(device=self.device, dtype=self.torch_dtype)
     
     
     @staticmethod
@@ -676,7 +674,6 @@ def swpe(img_pe, subyx,img_shapes):
 
 def model_fn_qwen_image(
     dit: QwenImageDiT = None,
-    ste: STE = None,
     blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None,
     latents=None,
     timestep=None,
@@ -763,35 +760,9 @@ def model_fn_qwen_image(
 
     img_freqs, txt_freqs = image_rotary_emb
     # Keep rotary embeddings 2D ([seq, dim]); rely on broadcast over heads in attention
-    running_img_freqs = img_freqs
 
     for block_id, block in enumerate(dit.transformer_blocks):
-        block_rotary = (running_img_freqs, txt_freqs)
-        if sub is not None:
-            # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                token_gate, _ = ste(image, layer_idx=block_id)  
-            token_gate = token_gate[:,:pe_sw.shape[0],:]
-
-            # # save token_gate mask for sub-region
-            # tmp_mask = token_gate[0][image_seq_len:noise_len,0].clone()
-            # # Save as image
-            # mask_2d = tmp_mask.view(h_s, w_s).float().cpu().numpy()
-            # mask_img = Image.fromarray((mask_2d * 255).astype(np.uint8), mode='L')
-            # mask_img.save(f"mask3/mask_timestep_{timestep.item()}_block_{block_id}.png")
-            
-            if token_gate.dim() == 1:
-                token_gate = token_gate.unsqueeze(-1)
-            if token_gate.shape[-1] == 1:
-                token_gate = token_gate[0].expand(-1, pe_sw.shape[1])  # [L, 64]
-            # 与未展开的二维 RoPE 逐维混合（复数频率×实数门控广播）
-            base_img_freqs = image_rotary_emb[0][:pe_sw.shape[0], :]  # [L, 64]
-            pe = pe_sw * (1 - token_gate) + base_img_freqs * token_gate  # [L, 64]
-
-            updated_img_freqs = running_img_freqs.clone()  # [S, D]
-            updated_img_freqs[:pe.shape[0], :] = pe
-            block_rotary = (updated_img_freqs, txt_freqs)
-            running_img_freqs = updated_img_freqs
+        block_rotary = (img_freqs, txt_freqs)
         
         text, image = gradient_checkpoint_forward(
             block,

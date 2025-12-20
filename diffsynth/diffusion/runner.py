@@ -18,6 +18,7 @@ def launch_training_task(
     num_workers: int = 8,
     save_steps: int = None,
     num_epochs: int = 1,
+    max_steps: int = None,
     wandb_project: str = None,
     wandb_name: str = None,
     args = None,
@@ -28,6 +29,7 @@ def launch_training_task(
         num_workers = args.dataset_num_workers
         save_steps = args.save_steps
         num_epochs = args.num_epochs
+        max_steps = getattr(args, "max_steps", None)
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
         save_resume_each_epoch = not getattr(args, "disable_epoch_resume", False)
@@ -60,8 +62,16 @@ def launch_training_task(
     
     for epoch_id in range(num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}")
+        stop_training = False
         for data in pbar:
             if data is None: continue
+            
+            # Check max_steps early stopping
+            if max_steps is not None and model_logger.num_steps >= max_steps:
+                print(f"\nReached max_steps ({max_steps}). Stopping training.")
+                stop_training = True
+                break
+                
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
@@ -104,6 +114,11 @@ def launch_training_task(
             accelerator.save_state('train/resume')
             if hasattr(optimizer, "train"):
                 optimizer.train()
+        
+        # Break out of epoch loop if max_steps reached
+        if stop_training:
+            break
+            
     model_logger.on_training_end(accelerator, model, save_steps)
 
 

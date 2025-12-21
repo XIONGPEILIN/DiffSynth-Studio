@@ -22,6 +22,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         offload_models=None,
         device="cpu",
         task="sft",
+        cfg_drop_prob=0.0,
     ):
         super().__init__()
         # Load models
@@ -45,6 +46,7 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.fp8_models = fp8_models
         self.task = task
+        self.cfg_drop_prob = cfg_drop_prob
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
@@ -91,6 +93,15 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
+        
+        inputs_shared, inputs_posi, inputs_nega = inputs
+        if self.training and self.cfg_drop_prob > 0:
+            if torch.rand(1).item() < self.cfg_drop_prob:
+                inputs_posi = inputs_posi.copy()
+                inputs_posi["prompt_emb"] = inputs_nega["prompt_emb"]
+                inputs_posi["prompt_emb_mask"] = inputs_nega["prompt_emb_mask"]
+                inputs = (inputs_shared, inputs_posi, inputs_nega)
+
         loss = self.task_to_loss[self.task](self.pipe, *inputs)
         return loss
 
@@ -105,6 +116,7 @@ def qwen_image_parser():
     parser.add_argument("--wandb_name", type=str, default=None, help="Wandb run name.")
     parser.add_argument("--disable_epoch_resume", action="store_true", help="If set, skip saving accelerator state each epoch (no resume checkpoints).")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to resume checkpoint. If provided, training will resume from this checkpoint.")
+    parser.add_argument("--cfg_drop_prob", type=float, default=0.0, help="Probability of dropping the text condition (CFG training).")
     return parser
 
 
@@ -152,6 +164,7 @@ if __name__ == "__main__":
         offload_models=args.offload_models,
         task=args.task,
         device=accelerator.device,
+        cfg_drop_prob=args.cfg_drop_prob,
     )
     model_logger = ModelLogger(
         args.output_path,

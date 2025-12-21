@@ -40,7 +40,7 @@ class QwenImagePipeline(BasePipeline):
             QwenImageUnit_InputImageEmbedder(),
             QwenImageUnit_SubInputImageEmbedder(),
             QwenImageUnit_Inpaint(),
-            QwenImageUnit_InpaintMaskProcessor(),
+            # QwenImageUnit_InpaintMaskProcessor(),
             QwenImageUnit_EditImageEmbedder(),
             QwenImageUnit_ContextImageEmbedder(),
             QwenImageUnit_PromptEmbedder(),
@@ -177,23 +177,23 @@ class QwenImagePipeline(BasePipeline):
             inputs_shared["latents"] = self.step(self.scheduler, latents=inputs_shared["latents"], progress_id=progress_id, noise_pred=noise_pred, **step_kwargs)
             inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
 
-            if inputs_shared.get("processed_inpaint_mask") is not None and inputs_shared.get("edit_latents") is not None:
-                mask = inputs_shared["processed_inpaint_mask"].to(device=self.device, dtype=self.torch_dtype)
+            # if inputs_shared.get("processed_inpaint_mask") is not None and inputs_shared.get("edit_latents") is not None:
+            #     mask = inputs_shared["processed_inpaint_mask"].to(device=self.device, dtype=self.torch_dtype)
                 
-                edit_latents = inputs_shared["edit_latents"]
-                if isinstance(edit_latents, list):
-                    edit_latents = edit_latents[0]
+            #     edit_latents = inputs_shared["edit_latents"]
+            #     if isinstance(edit_latents, list):
+            #         edit_latents = edit_latents[0]
                 
-                if isinstance(edit_latents, torch.Tensor) and edit_latents.shape == inputs_shared["latents"].shape:
-                    edit_latents = edit_latents.to(device=self.device, dtype=self.torch_dtype)
-                    noise = inputs_shared["noise"]
+            #     if isinstance(edit_latents, torch.Tensor) and edit_latents.shape == inputs_shared["latents"].shape:
+            #         edit_latents = edit_latents.to(device=self.device, dtype=self.torch_dtype)
+            #         noise = inputs_shared["noise"]
                     
-                    if progress_id + 1 < len(self.scheduler.timesteps):
-                        noise_timestep = self.scheduler.timesteps[progress_id + 1]
-                        edit_latents_noisy = self.scheduler.add_noise(edit_latents, noise, noise_timestep)
-                        inputs_shared["latents"] = inputs_shared["latents"] * mask + edit_latents_noisy * (1 - mask)
-                    else:
-                        inputs_shared["latents"] = inputs_shared["latents"] * mask + edit_latents * (1 - mask)
+            #         if progress_id + 1 < len(self.scheduler.timesteps):
+            #             noise_timestep = self.scheduler.timesteps[progress_id + 1]
+            #             edit_latents_noisy = self.scheduler.add_noise(edit_latents, noise, noise_timestep)
+            #             inputs_shared["latents"] = inputs_shared["latents"] * mask + edit_latents_noisy * (1 - mask)
+            #         else:
+            #             inputs_shared["latents"] = inputs_shared["latents"] * mask + edit_latents * (1 - mask)
 
         # Decode
         self.load_models_to_device(['vae'])

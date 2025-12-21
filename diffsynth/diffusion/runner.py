@@ -32,8 +32,10 @@ def launch_training_task(
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
         save_resume_each_epoch = not getattr(args, "disable_epoch_resume", False)
+        d0 = getattr(args, "d0", 1e-6)
     else:
         save_resume_each_epoch = True
+        d0 = 1e-6
     
     if learning_rate is None:
         learning_rate = 1.0
@@ -45,8 +47,8 @@ def launch_training_task(
     print(f"Total training steps: {total_steps}")
     print("Using Schedule-Free updates; no external LR scheduler will be applied.")
 
-    optimizer = ProdigyPlusScheduleFree(model.trainable_modules(),betas=(0.95, 0.99))
-    print("Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0,betas=(0.95, 0.99)")
+    optimizer = ProdigyPlusScheduleFree(model.trainable_modules(), betas=(0.95, 0.99), d0=d0)
+    print("Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0, betas=(0.95, 0.99))")
 
 
     

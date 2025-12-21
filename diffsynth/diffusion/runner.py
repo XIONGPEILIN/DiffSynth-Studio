@@ -1,4 +1,3 @@
-from ast import mod
 import imageio, os, torch, warnings, torchvision, argparse, json, inspect
 
 from tqdm import tqdm
@@ -52,6 +51,8 @@ def launch_training_task(
 
     
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+    model.train()
+    optimizer.train()
 
     
     resume_path = os.path.join(args.output_path, "accelerator_state")
@@ -82,9 +83,11 @@ def launch_training_task(
                 accelerator.backward(loss)
                 optimizer.step()
                 if save_steps is not None and (model_logger.num_steps + 1) % save_steps == 0:
+                    model.eval()
                     optimizer.eval()
                     model_logger.on_step_end(accelerator, model, save_steps)
                     optimizer.train()
+                    model.train()
                 else:
                     model_logger.on_step_end(accelerator, model, save_steps=None)
 
@@ -111,17 +114,21 @@ def launch_training_task(
                     "lr": f"{eff_lr:.2e}"
                 })
         if save_steps is None:
+            model.eval()
             optimizer.eval()
             model_logger.on_epoch_end(accelerator, model, epoch_id)
             optimizer.train()
+            model.train()
         
         # Break out of epoch loop if max_steps reached
         if stop_training:
             break
             
+    model.eval()
     optimizer.eval()
     model_logger.on_training_end(accelerator, model, save_steps)
     optimizer.train()
+    model.train()
 
 
 def launch_data_process_task(

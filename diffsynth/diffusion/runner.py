@@ -81,7 +81,12 @@ def launch_training_task(
                     loss, org_loss, back_loss, sub_loss  = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps)
+                if save_steps is not None and (model_logger.num_steps + 1) % save_steps == 0:
+                    optimizer.eval()
+                    model_logger.on_step_end(accelerator, model, save_steps)
+                    optimizer.train()
+                else:
+                    model_logger.on_step_end(accelerator, model, save_steps=None)
 
                 group0 = optimizer.param_groups[0]
                 eff_lr = group0.get("effective_lr", group0.get("lr", learning_rate))
@@ -106,13 +111,17 @@ def launch_training_task(
                     "lr": f"{eff_lr:.2e}"
                 })
         if save_steps is None:
+            optimizer.eval()
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+            optimizer.train()
         
         # Break out of epoch loop if max_steps reached
         if stop_training:
             break
             
+    optimizer.eval()
     model_logger.on_training_end(accelerator, model, save_steps)
+    optimizer.train()
 
 
 def launch_data_process_task(

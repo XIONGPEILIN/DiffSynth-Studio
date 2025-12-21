@@ -19,7 +19,8 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
         sub_noise = torch.randn_like(inputs["sub_input_latents"])
         inputs["sub_latents"] = pipe.scheduler.add_noise(inputs["sub_input_latents"], sub_noise, timestep)
         sub_training_target = pipe.scheduler.training_target(inputs["sub_input_latents"], sub_noise, timestep)
-
+    else:
+        print("Warning: sub_input_latents is not provided. Skip computing sub loss.")
     # 3) 前向
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
     model_out = pipe.model_fn(**models, **inputs, timestep=timestep)

@@ -107,13 +107,6 @@ def launch_training_task(
                 })
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
-        #save resume state
-        if save_resume_each_epoch:
-            if hasattr(optimizer, "eval"):
-                optimizer.eval()
-            accelerator.save_state('train/resume')
-            if hasattr(optimizer, "train"):
-                optimizer.train()
         
         # Break out of epoch loop if max_steps reached
         if stop_training:

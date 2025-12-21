@@ -654,22 +654,22 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
 
 
 
-def swpe(img_pe, subyx,img_shapes):
-    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
-    y1, y2, x1, x2 = subyx
-    pe = img_pe.clone()
-    img1_patch_shape = img_shapes[0]
-    img2_patch_shape = img_shapes[1]
-    img1_length = img1_patch_shape[1] * img1_patch_shape[2]
-    img2_length = img2_patch_shape[1] * img2_patch_shape[2]
-    image1_pe = pe[:img1_length, :]
-    image2_pe = pe[img1_length:img1_length + img2_length, :]
-    image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
-    image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-    image2_pe = image1_pe[y1:y2, x1:x2, :]
-    image2_pe = image2_pe.reshape(img2_length, -1)
-    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
-    return pe
+# def swpe(img_pe, subyx,img_shapes):
+#     #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
+#     y1, y2, x1, x2 = subyx
+#     pe = img_pe.clone()
+#     img1_patch_shape = img_shapes[0]
+#     img2_patch_shape = img_shapes[1]
+#     img1_length = img1_patch_shape[1] * img1_patch_shape[2]
+#     img2_length = img2_patch_shape[1] * img2_patch_shape[2]
+#     image1_pe = pe[:img1_length, :]
+#     image2_pe = pe[img1_length:img1_length + img2_length, :]
+#     image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
+#     image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
+#     image2_pe = image1_pe[y1:y2, x1:x2, :]
+#     image2_pe = image2_pe.reshape(img2_length, -1)
+#     pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
+#     return pe
 
 
 def model_fn_qwen_image(
@@ -748,22 +748,16 @@ def model_fn_qwen_image(
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
 
-    if subyx is not None:
-        # Build swapped PE without per-head expansion; keep 2D [seq, dim]
-        pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
+    # if subyx is not None:
+    #     # Build swapped PE without per-head expansion; keep 2D [seq, dim]
+    #     pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
 
 
     if blockwise_controlnet_conditioning is not None:
         blockwise_controlnet_conditioning = blockwise_controlnet.preprocess(
             blockwise_controlnet_inputs, blockwise_controlnet_conditioning)
 
-
-    img_freqs, txt_freqs = image_rotary_emb
-    # Keep rotary embeddings 2D ([seq, dim]); rely on broadcast over heads in attention
-
     for block_id, block in enumerate(dit.transformer_blocks):
-        block_rotary = (img_freqs, txt_freqs)
-        
         text, image = gradient_checkpoint_forward(
             block,
             use_gradient_checkpointing,
@@ -771,7 +765,7 @@ def model_fn_qwen_image(
             image=image,
             text=text,
             temb=conditioning,
-            image_rotary_emb=block_rotary,
+            image_rotary_emb=image_rotary_emb,
             attention_mask=attention_mask,
             enable_fp8_attention=enable_fp8_attention,
         )

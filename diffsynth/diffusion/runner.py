@@ -1,4 +1,3 @@
-from ast import mod
 import imageio, os, torch, warnings, torchvision, argparse, json, inspect
 
 from tqdm import tqdm
@@ -18,6 +17,7 @@ def launch_training_task(
     num_workers: int = 8,
     save_steps: int = None,
     num_epochs: int = 1,
+    max_steps: int = None,
     wandb_project: str = None,
     wandb_name: str = None,
     args = None,
@@ -28,6 +28,7 @@ def launch_training_task(
         num_workers = args.dataset_num_workers
         save_steps = args.save_steps
         num_epochs = args.num_epochs
+        max_steps = getattr(args, "max_steps", None)
         wandb_project = args.wandb_project
         wandb_name = args.wandb_name
         save_resume_each_epoch = not getattr(args, "disable_epoch_resume", False)
@@ -50,6 +51,8 @@ def launch_training_task(
 
     
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+    model.train()
+    optimizer.train()
 
     
     resume_path = os.path.join(args.output_path, "accelerator_state")
@@ -60,8 +63,16 @@ def launch_training_task(
     
     for epoch_id in range(num_epochs):
         pbar = tqdm(dataloader, desc=f"Epoch {epoch_id+1}/{num_epochs}")
+        stop_training = False
         for data in pbar:
             if data is None: continue
+            
+            # Check max_steps early stopping
+            if max_steps is not None and model_logger.num_steps >= max_steps:
+                print(f"\nReached max_steps ({max_steps}). Stopping training.")
+                stop_training = True
+                break
+                
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
@@ -71,7 +82,14 @@ def launch_training_task(
                     loss, org_loss, back_loss, sub_loss  = model(data)
                 accelerator.backward(loss)
                 optimizer.step()
-                model_logger.on_step_end(accelerator, model, save_steps)
+                if save_steps is not None and (model_logger.num_steps + 1) % save_steps == 0:
+                    model.eval()
+                    optimizer.eval()
+                    model_logger.on_step_end(accelerator, model, save_steps)
+                    optimizer.train()
+                    model.train()
+                else:
+                    model_logger.on_step_end(accelerator, model, save_steps=None)
 
                 group0 = optimizer.param_groups[0]
                 eff_lr = group0.get("effective_lr", group0.get("lr", learning_rate))
@@ -96,15 +114,21 @@ def launch_training_task(
                     "lr": f"{eff_lr:.2e}"
                 })
         if save_steps is None:
+            model.eval()
+            optimizer.eval()
             model_logger.on_epoch_end(accelerator, model, epoch_id)
-        #save resume state
-        if save_resume_each_epoch:
-            if hasattr(optimizer, "eval"):
-                optimizer.eval()
-            accelerator.save_state('train/resume')
-            if hasattr(optimizer, "train"):
-                optimizer.train()
+            optimizer.train()
+            model.train()
+        
+        # Break out of epoch loop if max_steps reached
+        if stop_training:
+            break
+            
+    model.eval()
+    optimizer.eval()
     model_logger.on_training_end(accelerator, model, save_steps)
+    optimizer.train()
+    model.train()
 
 
 def launch_data_process_task(

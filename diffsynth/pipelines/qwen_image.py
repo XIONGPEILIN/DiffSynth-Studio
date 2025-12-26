@@ -266,16 +266,21 @@ class QwenImageUnit_MaskGuidedNoise(PipelineUnit):
     def __init__(self):
         super().__init__(
             input_params=("noise", "back_mask", "height", "width", "rand_device",),
+            output_params=("sub_noise", "subyx"),
         )
 
     def process(self, pipe: QwenImagePipeline, noise, back_mask, height, width, rand_device):
-        back_mask = back_mask.convert("L")
-        bbox = back_mask.getbbox() if back_mask is not None else None
+        if back_mask is not None:
+            back_mask = back_mask.resize((width, height), resample=Image.NEAREST)
+            back_mask = back_mask.convert("L")
+            bbox = back_mask.getbbox()
+        else:
+            bbox = None
         if bbox is None:
-            return {}
-        
-        # PIL getbbox() returns (left, upper, right, lower) = (x1, y1, x2, y2)
-        left, upper, right, lower = bbox
+            left, upper, right, lower = 0, 0, width, height
+        else:
+            # PIL getbbox() returns (left, upper, right, lower) = (x1, y1, x2, y2)
+            left, upper, right, lower = bbox
         
         # 计算能被16整除的新坐标，确保包含整个mask区域
         # 左上角向下取整（扩展）到最近的16倍数

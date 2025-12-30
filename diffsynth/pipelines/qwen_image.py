@@ -705,6 +705,7 @@ def model_fn_qwen_image(
     edit_latents=None,
     context_latents=None,
     enable_fp8_attention=False,
+    use_gradient_checkpointing=False,
     use_gradient_checkpointing_offload=False,
     edit_rope_interpolation=False,
     zero_cond_t=False,

@@ -99,7 +99,7 @@ class QwenImagePipeline(BasePipeline):
         inpaint_mask: Image.Image = None,
         inpaint_blur_size: int = None,
         inpaint_blur_sigma: float = None,
-        inpaint_blend_alpha: float = 1.0,
+        inpaint_blend_alpha: float = 0,
         # Shape
         height: int = 1328,
         width: int = 1328,
@@ -131,6 +131,7 @@ class QwenImagePipeline(BasePipeline):
         progress_bar_cmd = tqdm,
         back_mask: Image.Image = None,
         pe_mask_dir: str = None,
+        use_bbox_mask: bool = False,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
@@ -157,6 +158,7 @@ class QwenImagePipeline(BasePipeline):
             "zero_cond_t": zero_cond_t,
             "back_mask": back_mask,
             "pe_mask_dir": pe_mask_dir,
+            "use_bbox_mask": use_bbox_mask,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -173,6 +175,16 @@ class QwenImagePipeline(BasePipeline):
                 noise_pred_nega, sub_noise_pred_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
                 sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
+
+                # CFG Rescaling
+                cond_norm = torch.norm(noise_pred_posi, dim=-1, keepdim=True)
+                noise_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
+                noise_pred = noise_pred * (cond_norm / noise_norm)
+
+                if sub_noise_pred is not None and sub_noise_pred_posi is not None:
+                    sub_cond_norm = torch.norm(sub_noise_pred_posi, dim=-1, keepdim=True)
+                    sub_noise_norm = torch.norm(sub_noise_pred, dim=-1, keepdim=True)
+                    sub_noise_pred = sub_noise_pred * (sub_cond_norm / sub_noise_norm)
             else:
                 noise_pred = noise_pred_posi
                 sub_noise_pred = sub_noise_pred_posi
@@ -185,6 +197,11 @@ class QwenImagePipeline(BasePipeline):
             if inputs_shared.get("processed_inpaint_mask") is not None and inputs_shared.get("edit_latents") is not None:
                 mask = inputs_shared["processed_inpaint_mask"].to(device=self.device, dtype=self.torch_dtype)
                 
+                if inputs_shared.get("use_bbox_mask", False) and inputs_shared.get("subyx") is not None:
+                    y1, y2, x1, x2 = inputs_shared["subyx"]
+                    mask = torch.zeros_like(mask)
+                    mask[:, :, y1*2:y2*2, x1*2:x2*2] = 1.0
+
                 edit_latents = inputs_shared["edit_latents"]
                 if isinstance(edit_latents, list):
                     edit_latents = edit_latents[0]
@@ -192,7 +209,7 @@ class QwenImagePipeline(BasePipeline):
                 if isinstance(edit_latents, torch.Tensor) and edit_latents.shape == inputs_shared["latents"].shape:
                     edit_latents = edit_latents.to(device=self.device, dtype=self.torch_dtype)
                     noise = inputs_shared["noise"]
-                    alpha = inputs_shared.get("inpaint_blend_alpha", 1.0)
+                    alpha = inputs_shared.get("inpaint_blend_alpha")
                     
                     if progress_id + 1 < len(self.scheduler.timesteps):
                         noise_timestep = self.scheduler.timesteps[progress_id + 1]
@@ -750,8 +767,10 @@ def model_fn_qwen_image(
     image = dit.img_in(image)
     if zero_cond_t:
         timestep = torch.cat([timestep, timestep * 0], dim=0)
+        # Calculate split index: 1 (main) + 1 (sub, if exists)
+        split_idx = 1 + (1 if sub is not None else 0)
         modulate_index = torch.tensor(
-            [[0] * prod(sample[0]) + [1] * sum([prod(s) for s in sample[1:]]) for sample in [img_shapes]],
+            [[0] * sum([prod(s) for s in sample[:split_idx]]) + [1] * sum([prod(s) for s in sample[split_idx:]]) for sample in [img_shapes]],
             device=timestep.device,
             dtype=torch.int,
         )

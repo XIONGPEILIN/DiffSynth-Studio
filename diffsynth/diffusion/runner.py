@@ -47,8 +47,9 @@ def launch_training_task(
     print(f"Total training steps: {total_steps}")
     print("Using Schedule-Free updates; no external LR scheduler will be applied.")
 
-    optimizer = ProdigyPlusScheduleFree(model.trainable_modules(), betas=(0.95, 0.99), d0=d0)
-    print("Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0, betas=(0.95, 0.99))")
+    prodigy_steps = 10000
+    optimizer = ProdigyPlusScheduleFree(model.trainable_modules(), betas=(0.95, 0.99), d0=d0, prodigy_steps=prodigy_steps)
+    print(f"Optimizer: ProdigyPlusScheduleFree (Schedule‑Free, lr=1.0, betas=(0.95, 0.99), prodigy_steps={prodigy_steps})")
 
 
     

@@ -41,6 +41,8 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     # 5) 权重
     org_loss = loss.clone()
     loss = loss * pipe.scheduler.training_weight(timestep)
+    back_loss = back_loss * pipe.scheduler.training_weight(timestep)
+    sub_loss = sub_loss * pipe.scheduler.training_weight(timestep)
     return loss, org_loss, back_loss, sub_loss
 
 

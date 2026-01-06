@@ -11,7 +11,7 @@ from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit, ControlNetInput
 
-from ..models.qwen_image_dit import QwenImageDiT, STE
+from ..models.qwen_image_dit import QwenImageDiT
 from ..models.qwen_image_text_encoder import QwenImageTextEncoder
 from ..models.qwen_image_vae import QwenImageVAE
 from ..models.qwen_image_controlnet import QwenImageBlockWiseControlNet
@@ -33,13 +33,13 @@ class QwenImagePipeline(BasePipeline):
         self.blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None
         self.tokenizer: Qwen2Tokenizer = None
         self.processor: Qwen2VLProcessor = None
-        self.in_iteration_models = ("dit", "blockwise_controlnet", "ste")
+        self.in_iteration_models = ("dit", "blockwise_controlnet")
         self.units = [
             QwenImageUnit_ShapeChecker(),
             QwenImageUnit_NoiseInitializer(),
             QwenImageUnit_MaskGuidedNoise(),
             QwenImageUnit_InputImageEmbedder(),
-            QwenImageUnit_SubInputImageEmbedder(),
+            # QwenImageUnit_SubInputImageEmbedder(), [ABLATION]
             QwenImageUnit_Inpaint(),
             QwenImageUnit_InpaintMaskProcessor(),
             QwenImageUnit_EditImageEmbedder(),
@@ -49,8 +49,7 @@ class QwenImagePipeline(BasePipeline):
             QwenImageUnit_BlockwiseControlNet(),
         ]
         self.model_fn = model_fn_qwen_image
-        self.ste = STE()
-        self.ste = self.ste.to(device=self.device, dtype=self.torch_dtype)
+        # [ABLATION] Removed self.ste initialization
     
     
     @staticmethod
@@ -170,29 +169,23 @@ class QwenImagePipeline(BasePipeline):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
 
             # Inference
-            noise_pred_posi, sub_noise_pred_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
+            # [ABLATION] Removed sub_noise_pred_posi/nega
+            noise_pred_posi, _ = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
             if cfg_scale != 1.0:
-                noise_pred_nega, sub_noise_pred_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
+                noise_pred_nega, _ = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
-                sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
 
                 # CFG Rescaling
                 cond_norm = torch.norm(noise_pred_posi, dim=-1, keepdim=True)
                 noise_norm = torch.norm(noise_pred, dim=-1, keepdim=True)
                 noise_pred = noise_pred * (cond_norm / noise_norm)
-
-                if sub_noise_pred is not None and sub_noise_pred_posi is not None:
-                    sub_cond_norm = torch.norm(sub_noise_pred_posi, dim=-1, keepdim=True)
-                    sub_noise_norm = torch.norm(sub_noise_pred, dim=-1, keepdim=True)
-                    sub_noise_pred = sub_noise_pred * (sub_cond_norm / sub_noise_norm)
             else:
                 noise_pred = noise_pred_posi
-                sub_noise_pred = sub_noise_pred_posi
 
             # Scheduler
+            # [ABLATION] Removed sub_latents update
             step_kwargs = {k: v for k, v in inputs_shared.items() if k not in ["latents", "sub_latents"]}
             inputs_shared["latents"] = self.step(self.scheduler, latents=inputs_shared["latents"], progress_id=progress_id, noise_pred=noise_pred, **step_kwargs)
-            inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
 
             if inputs_shared.get("processed_inpaint_mask") is not None and inputs_shared.get("edit_latents") is not None:
                 mask = inputs_shared["processed_inpaint_mask"].to(device=self.device, dtype=self.torch_dtype)
@@ -221,12 +214,11 @@ class QwenImagePipeline(BasePipeline):
         # Decode
         self.load_models_to_device(['vae'])
         image = self.vae.decode(inputs_shared["latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
-        sub_image = self.vae.decode(inputs_shared["sub_latents"], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        # [ABLATION] Removed sub_image decode
         image = self.vae_output_to_image(image)
-        sub_image = self.vae_output_to_image(sub_image)
         self.load_models_to_device([])
 
-        return image, sub_image
+        return image, None
 
 
 class QwenImageBlockwiseMultiControlNet(torch.nn.Module):
@@ -704,7 +696,7 @@ def swpe(img_pe, subyx,img_shapes):
 
 def model_fn_qwen_image(
     dit: QwenImageDiT = None,
-    ste: STE = None,
+    ste = None,
     blockwise_controlnet: QwenImageBlockwiseMultiControlNet = None,
     latents=None,
     timestep=None,
@@ -738,21 +730,7 @@ def model_fn_qwen_image(
     image = rearrange(latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=height//16, W=width//16, P=2, Q=2)
     image_seq_len = image.shape[1]
 
-
-    sub = None
-    if sub_latents is not None:
-        y1, y2, x1, x2 = subyx
-        img_shapes += [(sub_latents.shape[0], sub_latents.shape[2]//2, sub_latents.shape[3]//2)]
-        h_s, w_s = y2 - y1, x2 - x1
-        sub = rearrange(sub_latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=h_s, W=w_s, P=2, Q=2)
-
-    
-    if sub is not None:
-        image = torch.cat([image, sub], dim=1)
-        noise_len = image.shape[1]
-    else:
-        noise_len = None
-
+    # [ABLATION] Removed sub_latents processing and concatenation
 
     if context_latents is not None:
         img_shapes += [(context_latents.shape[0], context_latents.shape[2]//2, context_latents.shape[3]//2)]
@@ -767,8 +745,8 @@ def model_fn_qwen_image(
     image = dit.img_in(image)
     if zero_cond_t:
         timestep = torch.cat([timestep, timestep * 0], dim=0)
-        # Calculate split index: 1 (main) + 1 (sub, if exists)
-        split_idx = 1 + (1 if sub is not None else 0)
+        # [ABLATION] Only main image (split_idx=1)
+        split_idx = 1 
         modulate_index = torch.tensor(
             [[0] * sum([prod(s) for s in sample[:split_idx]]) + [1] * sum([prod(s) for s in sample[split_idx:]]) for sample in [img_shapes]],
             device=timestep.device,
@@ -791,47 +769,13 @@ def model_fn_qwen_image(
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
 
-    if subyx is not None:
-        # Build swapped PE without per-head expansion; keep 2D [seq, dim]
-        pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
-
-
-    if blockwise_controlnet_conditioning is not None:
-        blockwise_controlnet_conditioning = blockwise_controlnet.preprocess(
-            blockwise_controlnet_inputs, blockwise_controlnet_conditioning)
-
+    # [ABLATION] Removed swpe and token gating logic
 
     img_freqs, txt_freqs = image_rotary_emb
-    # Keep rotary embeddings 2D ([seq, dim]); rely on broadcast over heads in attention
     running_img_freqs = img_freqs
 
     for block_id, block in enumerate(dit.transformer_blocks):
         block_rotary = (running_img_freqs, txt_freqs)
-        if sub is not None:
-            # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                token_gate, _ = ste(image, layer_idx=block_id)  
-            token_gate = token_gate[:,:pe_sw.shape[0],:]
-
-            # # save token_gate mask for sub-region
-            # tmp_mask = token_gate[0][image_seq_len:noise_len,0].clone()
-            # # Save as image
-            # mask_2d = tmp_mask.view(h_s, w_s).float().cpu().numpy()
-            # mask_img = Image.fromarray((mask_2d * 255).astype(np.uint8), mode='L')
-            # mask_img.save(f"mask3/mask_timestep_{timestep.item()}_block_{block_id}.png")
-            
-            if token_gate.dim() == 1:
-                token_gate = token_gate.unsqueeze(-1)
-            if token_gate.shape[-1] == 1:
-                token_gate = token_gate[0].expand(-1, pe_sw.shape[1])  # [L, 64]
-            # 与未展开的二维 RoPE 逐维混合（复数频率×实数门控广播）
-            base_img_freqs = image_rotary_emb[0][:pe_sw.shape[0], :]  # [L, 64]
-            pe = pe_sw * (1 - token_gate) + base_img_freqs * token_gate  # [L, 64]
-
-            updated_img_freqs = running_img_freqs.clone()  # [S, D]
-            updated_img_freqs[:pe.shape[0], :] = pe
-            block_rotary = (updated_img_freqs, txt_freqs)
-            running_img_freqs = updated_img_freqs
         
         text, image = gradient_checkpoint_forward(
             block,
@@ -861,11 +805,5 @@ def model_fn_qwen_image(
     image = image_all[:, :image_seq_len]
     
     latents = rearrange(image, "B (H W) (C P Q) -> B C (H P) (W Q)", H=height//16, W=width//16, P=2, Q=2)
-    if noise_len is not None:
-        sub_latents = image_all[:, image_seq_len:noise_len]
-        sub_latents = rearrange(sub_latents, "B (H W) (C P Q) -> B C (H P) (W Q)", H=h_s, W=w_s, P=2, Q=2)
-        return latents, sub_latents
-
-
-
-    return latents
+    # [ABLATION] Return only main latents
+    return latents, None

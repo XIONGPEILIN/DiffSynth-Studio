@@ -81,9 +81,12 @@ def launch_training_task(
                 optimizer.zero_grad()
                 if hasattr(dataset, 'load_from_cache') and dataset.load_from_cache:
                     loss, org_loss, back_loss, sub_loss = model({}, inputs=data)
-
                 else:
                     loss, org_loss, back_loss, sub_loss  = model(data)
+                
+                # DEBUG PRINT
+                print(f"[DEBUG Runner] Loss: {loss.item() if hasattr(loss, 'item') else loss}, Shape: {loss.shape if hasattr(loss, 'shape') else 'N/A'}, Grad: {loss.requires_grad if hasattr(loss, 'requires_grad') else 'N/A'}")
+                
                 accelerator.backward(loss)
                 optimizer.step()
                 if save_steps is not None and (model_logger.num_steps + 1) % save_steps == 0:

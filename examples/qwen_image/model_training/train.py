@@ -1,9 +1,8 @@
 import torch, os, argparse, accelerate
-from PIL import Image
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import *
-from diffsynth.pipelines.qwen_image import QwenImagePipeline, ModelConfig
+from diffsynth.pipelines.qwen_image import QwenImagePipeline, ModelConfig, ControlNetInput
 from diffsynth.diffusion import *
+from diffsynth.core.data.operators import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
@@ -22,8 +21,8 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         offload_models=None,
         device="cpu",
         task="sft",
-        cfg_drop_prob=0.0,
         zero_cond_t=False,
+        cfg_drop_prob=0.0,
     ):
         super().__init__()
         # Load models
@@ -47,8 +46,8 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.fp8_models = fp8_models
         self.task = task
-        self.cfg_drop_prob = cfg_drop_prob
         self.zero_cond_t = zero_cond_t
+        self.cfg_drop_prob = cfg_drop_prob
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
             "direct_distill:data_process": lambda pipe, *args: args,
@@ -62,11 +61,6 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         inputs_posi = {"prompt": data["prompt"]}
         inputs_nega = {"negative_prompt": ""}
         inputs_shared = {
-            # Assume you are using this pipeline for inference,
-            # please fill in the input parameters.
-            "input_image": data["image"],
-            "height": data["image"].size[1],
-            "width": data["image"].size[0],
             # Please do not modify the following parameters
             # unless you clearly know what this will cause.
             "cfg_scale": 1,
@@ -75,30 +69,94 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
             "use_gradient_checkpointing_offload": self.use_gradient_checkpointing_offload,
             "edit_image_auto_resize": True,
             "zero_cond_t": self.zero_cond_t,
+            "tiled": False,
+            "tile_size": 128,
+            "tile_stride": 64,
         }
+        # Assume you are using this pipeline for inference,
+        # please fill in the input parameters.
+        if "image" in data:
+            if isinstance(data["image"], list):
+                inputs_shared.update({
+                    "input_image": data["image"],
+                    "height": data["image"][0].size[1],
+                    "width": data["image"][0].size[0],
+                })
+            else:
+                inputs_shared.update({
+                    "input_image": data["image"],
+                    "height": data["image"].size[1],
+                    "width": data["image"].size[0],
+                })
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
 
         # Mapping for ControlNet training using custom dataset keys
         if "edit_image" in inputs_shared:
-            inputs_shared["blockwise_controlnet_image"] = inputs_shared["edit_image"]
-        if "back_mask" in inputs_shared:
-            inputs_shared["blockwise_controlnet_inpaint_mask"] = inputs_shared["back_mask"]
-
-        # Synthesize back_mask if missing
-        if "back_mask" not in inputs_shared:
-            if "mask" in data:
-                inputs_shared["back_mask"] = data["mask"]
-            elif "edit_image" in inputs_shared:
-                edit_img = inputs_shared["edit_image"]
-                if isinstance(edit_img, list) and len(edit_img) > 0:
-                    edit_img = edit_img[0]
-                if isinstance(edit_img, Image.Image) and edit_img.mode == "RGBA":
-                    inputs_shared["back_mask"] = edit_img.split()[-1]
+            img = inputs_shared["edit_image"]
+            if isinstance(img, list): img = img[0]
+            mask = inputs_shared.get("back_mask")
+            if isinstance(mask, list): mask = mask[0]
+            if mask is None and "mask" in data: mask = data["mask"]
+            inputs_shared["blockwise_controlnet_inputs"] = [ControlNetInput(image=img, inpaint_mask=mask)]
 
         return inputs_shared, inputs_posi, inputs_nega
     
     def forward(self, data, inputs=None):
         if inputs is None: inputs = self.get_pipeline_inputs(data)
+        
+        # Unpack inputs
+        inputs_shared, inputs_posi, inputs_nega = inputs
+        
+        # CRITICAL FIX: Copy inputs_shared to prevent side-effects impacting Checkpoint Recompute
+        inputs_shared = inputs_shared.copy()
+        
+        # Disable Manual GC Offload (Let DeepSpeed handle it via yaml config)
+        # inputs_shared["use_gradient_checkpointing_offload"] = True
+
+        # FORCE DISABLE GC (Switching to ZeRO-2 Offload strategy)
+        inputs_shared["use_gradient_checkpointing"] = False
+        
+        # Inject ControlNet inputs (Run on COPY)
+        # Note: logic relies on "edit_latents" being present (which it is in cache)
+        if "edit_latents" in inputs_shared:
+            if os.getenv("RANK", "0") == "0":
+                pass 
+            
+            edit_l = inputs_shared["edit_latents"]
+            if isinstance(edit_l, list): edit_l = edit_l[0]
+            
+            # Check for mask
+            mask_l = inputs_shared.get("processed_inpaint_mask")
+            if mask_l is not None:
+                if isinstance(mask_l, list): mask_l = mask_l[0]
+                if mask_l.shape[-2:] != edit_l.shape[-2:]:
+                    mask_l = torch.nn.functional.interpolate(mask_l, size=edit_l.shape[-2:])
+                
+                mask_final = 1 - mask_l
+                combined = torch.cat([edit_l, mask_final], dim=1)
+                
+                # RE-CREATE input list to ensure fresh objects
+                inputs_shared["blockwise_controlnet_inputs"] = [ControlNetInput(image=None)]
+                
+                # MANUAL PREPROCESS
+                cond_list = [combined]
+                inp_list = inputs_shared["blockwise_controlnet_inputs"]
+                
+                try:
+                    if hasattr(self.pipe, "blockwise_controlnet") and self.pipe.blockwise_controlnet is not None:
+                        processed = self.pipe.blockwise_controlnet.preprocess(inp_list, cond_list)
+                        inputs_shared["blockwise_controlnet_conditioning"] = processed
+                    else:
+                        inputs_shared["blockwise_controlnet_conditioning"] = cond_list
+                except Exception as e:
+                    inputs_shared["blockwise_controlnet_conditioning"] = cond_list
+
+            else:
+                inputs_shared["blockwise_controlnet_conditioning"] = [edit_l]
+
+        # Pack the modified copy back into inputs tuple
+        inputs = (inputs_shared, inputs_posi, inputs_nega)
+
         inputs = self.transfer_data_to_device(inputs, self.pipe.device, self.pipe.torch_dtype)
         for unit in self.pipe.units:
             inputs = self.pipe.unit_runner(unit, self.pipe, *inputs)
@@ -152,9 +210,7 @@ if __name__ == "__main__":
             width_division_factor=16,
         ),
         special_operator_map={
-        "ref_gt": ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
-        "back_mask": ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
-        "edit_image": (lambda x: x[0] if isinstance(x, list) else x) >> ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
+            "ref_gt": ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
         },
     )
     model = QwenImageTrainingModule(
@@ -169,7 +225,7 @@ if __name__ == "__main__":
         lora_checkpoint=args.lora_checkpoint,
         preset_lora_path=args.preset_lora_path,
         preset_lora_model=args.preset_lora_model,
-        use_gradient_checkpointing=args.use_gradient_checkpointing,
+        use_gradient_checkpointing=False,
         use_gradient_checkpointing_offload=args.use_gradient_checkpointing_offload,
         extra_inputs=args.extra_inputs,
         fp8_models=args.fp8_models,

@@ -78,6 +78,12 @@ class QwenImageTrainingModule(DiffusionTrainingModule):
         }
         inputs_shared = self.parse_extra_inputs(data, self.extra_inputs, inputs_shared)
 
+        # Mapping for ControlNet training using custom dataset keys
+        if "edit_image" in inputs_shared:
+            inputs_shared["blockwise_controlnet_image"] = inputs_shared["edit_image"]
+        if "back_mask" in inputs_shared:
+            inputs_shared["blockwise_controlnet_inpaint_mask"] = inputs_shared["back_mask"]
+
         # Synthesize back_mask if missing
         if "back_mask" not in inputs_shared:
             if "mask" in data:
@@ -147,6 +153,8 @@ if __name__ == "__main__":
         ),
         special_operator_map={
         "ref_gt": ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
+        "back_mask": ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
+        "edit_image": (lambda x: x[0] if isinstance(x, list) else x) >> ToAbsolutePath(args.dataset_base_path) >> LoadImage(convert_RGB=True),
         },
     )
     model = QwenImageTrainingModule(

@@ -132,6 +132,9 @@ class QwenImagePipeline(BasePipeline):
         back_mask: Image.Image = None,
         pe_mask_dir: str = None,
         use_bbox_mask: bool = False,
+        ablation_token_gate: int = None,
+        ablation_no_sub_noise: bool = False,
+        ablation_mask_sub: bool = False,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
@@ -159,6 +162,9 @@ class QwenImagePipeline(BasePipeline):
             "back_mask": back_mask,
             "pe_mask_dir": pe_mask_dir,
             "use_bbox_mask": use_bbox_mask,
+            "ablation_token_gate": ablation_token_gate,
+            "ablation_no_sub_noise": ablation_no_sub_noise,
+            "ablation_mask_sub": ablation_mask_sub,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -700,6 +706,25 @@ def swpe(img_pe, subyx,img_shapes):
     image2_pe = image2_pe.reshape(img2_length, -1)
     pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
     return pe
+# def swpe(img_pe, subyx,img_shapes):
+#     # 将子图像的位置编码替换到主图像的对应区域中
+#     y1, y2, x1, x2 = subyx
+#     pe = img_pe.clone()
+#     img1_patch_shape = img_shapes[0]
+#     img2_patch_shape = img_shapes[1]
+#     img1_length = img1_patch_shape[1] * img1_patch_shape[2]
+#     img2_length = img2_patch_shape[1] * img2_patch_shape[2]
+    
+#     # 提取主图像和子图像的 PE
+#     image1_pe = pe[:img1_length, :].reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
+#     image2_pe = pe[img1_length:img1_length + img2_length, :].reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
+    
+#     # 将子图像的 PE 替换到主图像的对应区域
+#     image1_pe[y1:y2, x1:x2, :] = image2_pe
+    
+#     # 重新拼接并返回
+#     pe = torch.cat([image1_pe.reshape(img1_length, -1), pe[img1_length:, :]], dim=0)
+#     return pe
 
 
 def model_fn_qwen_image(
@@ -729,6 +754,9 @@ def model_fn_qwen_image(
     sub_latents=None,
     subyx=None,
     pe_mask_dir=None,
+    ablation_token_gate=None,
+    ablation_no_sub_noise=False,
+    ablation_mask_sub=False,
     **kwargs
 ):
     img_shapes = [(latents.shape[0], latents.shape[2]//2, latents.shape[3]//2)]
@@ -742,9 +770,13 @@ def model_fn_qwen_image(
     sub = None
     if sub_latents is not None:
         y1, y2, x1, x2 = subyx
-        img_shapes += [(sub_latents.shape[0], sub_latents.shape[2]//2, sub_latents.shape[3]//2)]
-        h_s, w_s = y2 - y1, x2 - x1
-        sub = rearrange(sub_latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=h_s, W=w_s, P=2, Q=2)
+        if not ablation_no_sub_noise:
+            img_shapes += [(sub_latents.shape[0], sub_latents.shape[2]//2, sub_latents.shape[3]//2)]
+            h_s, w_s = y2 - y1, x2 - x1
+            sub = rearrange(sub_latents, "B C (H P) (W Q) -> B (H W) (C P Q)", H=h_s, W=w_s, P=2, Q=2)
+        else:
+            # Calculate h_s, w_s for return value logic if needed, but primarily keep sub=None
+            h_s, w_s = y2 - y1, x2 - x1
 
     
     if sub is not None:
@@ -790,8 +822,27 @@ def model_fn_qwen_image(
         else:
             image_rotary_emb = dit.pos_embed(img_shapes, txt_seq_lens, device=latents.device)
         attention_mask = None
+    
+    if ablation_mask_sub and sub is not None:
+        S_txt = text.shape[1]
+        S_img = image.shape[1]
+        S_total = S_txt + S_img
+        
+        if attention_mask is None:
+            # Joint Attention Mask: [Batch, 1, S_total, S_total]
+            attention_mask = torch.zeros((image.shape[0], 1, S_total, S_total), device=image.device, dtype=image.dtype)
+        
+        # Indices in Joint Sequence
+        main_start = S_txt
+        main_end = S_txt + image_seq_len
+        sub_start = S_txt + image_seq_len
+        sub_end = S_txt + noise_len
+        
+        # Mask Main <-> Sub
+        attention_mask[:, :, main_start:main_end, sub_start:sub_end] = -torch.finfo(image.dtype).max
+        attention_mask[:, :, sub_start:sub_end, main_start:main_end] = -torch.finfo(image.dtype).max
 
-    if subyx is not None:
+    if subyx is not None and sub is not None:
         # Build swapped PE without per-head expansion; keep 2D [seq, dim]
         pe_sw = swpe(image_rotary_emb[0], subyx, img_shapes)
 
@@ -811,6 +862,15 @@ def model_fn_qwen_image(
             # 使用 STE 产生 token 级门控，先输出 [L,1] 再扩展到 RoPE 维度
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 token_gate, _ = ste(image, layer_idx=block_id)  
+            
+            if ablation_token_gate is not None:
+                if ablation_token_gate == 0:
+                    token_gate = torch.zeros_like(token_gate)
+                elif ablation_token_gate == 1:
+                    token_gate = torch.ones_like(token_gate)
+            elif ablation_no_sub_noise:
+                token_gate = torch.ones_like(token_gate)
+
             token_gate = token_gate[:,:pe_sw.shape[0],:]
 
             # # save token_gate mask for sub-region
@@ -865,6 +925,8 @@ def model_fn_qwen_image(
         sub_latents = image_all[:, image_seq_len:noise_len]
         sub_latents = rearrange(sub_latents, "B (H W) (C P Q) -> B C (H P) (W Q)", H=h_s, W=w_s, P=2, Q=2)
         return latents, sub_latents
+    elif sub_latents is not None and ablation_no_sub_noise:
+        return latents, torch.zeros_like(sub_latents)
 
 
 

@@ -692,41 +692,41 @@ class QwenImageUnit_ContextImageEmbedder(PipelineUnit):
 
 
 
-# def swpe(img_pe, subyx,img_shapes):
-#     #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
-#     y1, y2, x1, x2 = subyx
-#     pe = img_pe.clone()
-#     img1_patch_shape = img_shapes[0]
-#     img2_patch_shape = img_shapes[1]
-#     img1_length = img1_patch_shape[1] * img1_patch_shape[2]
-#     img2_length = img2_patch_shape[1] * img2_patch_shape[2]
-#     image1_pe = pe[:img1_length, :]
-#     image2_pe = pe[img1_length:img1_length + img2_length, :]
-#     image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
-#     image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-#     image2_pe = image1_pe[y1:y2, x1:x2, :]
-#     image2_pe = image2_pe.reshape(img2_length, -1)
-#     pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
-#     return pe
 def swpe(img_pe, subyx,img_shapes):
-    # 将子图像的位置编码替换到主图像的对应区域中
+    #从主图像的位置编码中提取子区域，并替换子图像的位置编码，使子图像"继承"主图像对应区域的空间位置信息
     y1, y2, x1, x2 = subyx
     pe = img_pe.clone()
     img1_patch_shape = img_shapes[0]
     img2_patch_shape = img_shapes[1]
     img1_length = img1_patch_shape[1] * img1_patch_shape[2]
     img2_length = img2_patch_shape[1] * img2_patch_shape[2]
-    
-    # 提取主图像和子图像的 PE
-    image1_pe = pe[:img1_length, :].reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
-    image2_pe = pe[img1_length:img1_length + img2_length, :].reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
-    
-    # 将子图像的 PE 替换到主图像的对应区域
-    image1_pe[y1:y2, x1:x2, :] = image2_pe
-    
-    # 重新拼接并返回
-    pe = torch.cat([image1_pe.reshape(img1_length, -1), pe[img1_length:, :]], dim=0)
+    image1_pe = pe[:img1_length, :]
+    image2_pe = pe[img1_length:img1_length + img2_length, :]
+    image1_pe = image1_pe.reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
+    image2_pe = image2_pe.reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
+    image2_pe = image1_pe[y1:y2, x1:x2, :]
+    image2_pe = image2_pe.reshape(img2_length, -1)
+    pe = torch.cat([image1_pe.reshape(img1_length, -1), image2_pe], dim=0)
     return pe
+# def swpe(img_pe, subyx,img_shapes):
+#     # 将子图像的位置编码替换到主图像的对应区域中
+#     y1, y2, x1, x2 = subyx
+#     pe = img_pe.clone()
+#     img1_patch_shape = img_shapes[0]
+#     img2_patch_shape = img_shapes[1]
+#     img1_length = img1_patch_shape[1] * img1_patch_shape[2]
+#     img2_length = img2_patch_shape[1] * img2_patch_shape[2]
+    
+#     # 提取主图像和子图像的 PE
+#     image1_pe = pe[:img1_length, :].reshape(img1_patch_shape[1], img1_patch_shape[2], -1)
+#     image2_pe = pe[img1_length:img1_length + img2_length, :].reshape(img2_patch_shape[1], img2_patch_shape[2], -1)
+    
+#     # 将子图像的 PE 替换到主图像的对应区域
+#     image1_pe[y1:y2, x1:x2, :] = image2_pe
+    
+#     # 重新拼接并返回
+#     pe = torch.cat([image1_pe.reshape(img1_length, -1), pe[img1_length:, :]], dim=0)
+#     return pe
 
 
 def model_fn_qwen_image(

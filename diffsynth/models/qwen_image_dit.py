@@ -3,6 +3,18 @@ import torch.nn as nn
 from typing import Tuple, Optional, Union, List
 from einops import rearrange
 from .general_modules import TimestepEmbeddings, RMSNorm, AdaLayerNorm
+import os
+import numpy as np
+from PIL import Image
+
+# Global configuration for attention capturing
+ATTN_CAPTURE_CONFIG = {
+    "enable": False,
+    "save_dir": "attn_maps",
+    "step_counter": 0,
+    "layer_counter": 0,
+    "image_segments": {} # To record lengths of main/sub/context/edit
+}
 
 try:
     import flash_attn_interface
@@ -306,6 +318,58 @@ class QwenDoubleStreamAttention(nn.Module):
         joint_v = torch.cat([txt_v, img_v], dim=2)
 
         joint_attn_out = qwen_image_flash_attention(joint_q, joint_k, joint_v, num_heads=joint_q.shape[1], attention_mask=attention_mask, enable_fp8_attention=enable_fp8_attention).to(joint_q.dtype)
+
+        # --- Capture Attention Logic ---
+        if ATTN_CAPTURE_CONFIG["enable"]:
+            try:
+                # 1. Recompute Scaled Dot Product Attention (FlashAttn doesn't return weights)
+                scale = 1.0 / math.sqrt(joint_q.shape[-1])
+                
+                # Computation: [B, H, S, D] @ [B, H, D, S] -> [B, H, S, S]
+                # Use float32 for precision during softmax
+                scores = torch.matmul(joint_q.float(), joint_k.float().transpose(-2, -1)) * scale
+                
+                if attention_mask is not None:
+                    scores = scores + attention_mask.float()
+                
+                probs = torch.softmax(scores, dim=-1)
+                
+                # 2. Extract Cross-Attention Blocks
+                # Structure: [Text | Image]
+                # seq_txt is the boundary
+                
+                # Image-to-Text (Forward Cross): [B, H, Seq_Img, Seq_Txt]
+                img2txt = probs[:, :, seq_txt:, :seq_txt]
+                
+                # Text-to-Image (Backward Cross): [B, H, Seq_Txt, Seq_Img]
+                txt2img = probs[:, :, :seq_txt, seq_txt:]
+                
+                # 3. Average Heads -> [B, Seq_Img, Seq_Txt]
+                img2txt_avg = img2txt.mean(dim=1)
+                txt2img_avg = txt2img.mean(dim=1)
+                
+                # 4. Save
+                save_dir = ATTN_CAPTURE_CONFIG["save_dir"]
+                step = ATTN_CAPTURE_CONFIG["step_counter"]
+                layer = ATTN_CAPTURE_CONFIG["layer_counter"]
+                
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir, exist_ok=True)
+                    
+                torch.save(img2txt_avg.half(), os.path.join(save_dir, f"attn_s{step}_l{layer}_img2txt.pt"))
+                torch.save(txt2img_avg.half(), os.path.join(save_dir, f"attn_s{step}_l{layer}_txt2img.pt"))
+                
+                # Save Segments Metadata (Once)
+                if step == 0 and layer == 0:
+                    meta_path = os.path.join(save_dir, "segments_metadata.pt")
+                    torch.save(ATTN_CAPTURE_CONFIG["image_segments"], meta_path)
+                
+                # Update global layer counter
+                ATTN_CAPTURE_CONFIG["layer_counter"] += 1
+                
+            except Exception as e:
+                print(f"[Attention Capture Error] {e}")
+        # -------------------------------
 
         txt_attn_output = joint_attn_out[:, :seq_txt, :]
         img_attn_output = joint_attn_out[:, seq_txt:, :]

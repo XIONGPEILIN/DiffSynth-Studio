@@ -11,7 +11,7 @@ from ..diffusion import FlowMatchScheduler
 from ..core import ModelConfig, gradient_checkpoint_forward
 from ..diffusion.base_pipeline import BasePipeline, PipelineUnit, ControlNetInput
 
-from ..models.qwen_image_dit import QwenImageDiT, STE
+from ..models.qwen_image_dit import QwenImageDiT, STE, ATTN_CAPTURE_CONFIG
 from ..models.qwen_image_text_encoder import QwenImageTextEncoder
 from ..models.qwen_image_vae import QwenImageVAE
 from ..models.qwen_image_controlnet import QwenImageBlockWiseControlNet
@@ -132,6 +132,11 @@ class QwenImagePipeline(BasePipeline):
         back_mask: Image.Image = None,
         pe_mask_dir: str = None,
         use_bbox_mask: bool = False,
+        # Ablation
+        ablation_token_gate: int = None,
+        ablation_no_sub_noise: bool = False,
+        ablation_mask_sub: bool = False,
+        ablation_mask_sub_self: bool = False,
     ):
         # Scheduler
         self.scheduler.set_timesteps(num_inference_steps, denoising_strength=denoising_strength, dynamic_shift_len=(height // 16) * (width // 16), exponential_shift_mu=exponential_shift_mu)
@@ -159,6 +164,10 @@ class QwenImagePipeline(BasePipeline):
             "back_mask": back_mask,
             "pe_mask_dir": pe_mask_dir,
             "use_bbox_mask": use_bbox_mask,
+            "ablation_token_gate": ablation_token_gate,
+            "ablation_no_sub_noise": ablation_no_sub_noise,
+            "ablation_mask_sub": ablation_mask_sub,
+            "ablation_mask_sub_self": ablation_mask_sub_self,
         }
         for unit in self.units:
             inputs_shared, inputs_posi, inputs_nega = self.unit_runner(unit, self, inputs_shared, inputs_posi, inputs_nega)
@@ -166,13 +175,29 @@ class QwenImagePipeline(BasePipeline):
         # Denoise
         self.load_models_to_device(self.in_iteration_models)
         models = {name: getattr(self, name) for name in self.in_iteration_models}
+
+        # Reset Global Counters for Attention Capture
+        ATTN_CAPTURE_CONFIG["step_counter"] = 0
+
         for progress_id, timestep in enumerate(progress_bar_cmd(self.scheduler.timesteps)):
             timestep = timestep.unsqueeze(0).to(dtype=self.torch_dtype, device=self.device)
 
             # Inference
+            # Reset layer counter for Positive pass
+            ATTN_CAPTURE_CONFIG["layer_counter"] = 0
+            
             noise_pred_posi, sub_noise_pred_posi = self.model_fn(**models, **inputs_shared, **inputs_posi, timestep=timestep, progress_id=progress_id)
+            
             if cfg_scale != 1.0:
+                # Temporarily disable capture for Negative pass
+                was_enabled = ATTN_CAPTURE_CONFIG["enable"]
+                ATTN_CAPTURE_CONFIG["enable"] = False
+                
                 noise_pred_nega, sub_noise_pred_nega = self.model_fn(**models, **inputs_shared, **inputs_nega, timestep=timestep, progress_id=progress_id)
+                
+                # Restore capture state
+                ATTN_CAPTURE_CONFIG["enable"] = was_enabled
+
                 noise_pred = noise_pred_nega + cfg_scale * (noise_pred_posi - noise_pred_nega)
                 sub_noise_pred = sub_noise_pred_nega + cfg_scale * (sub_noise_pred_posi - sub_noise_pred_nega)
 
@@ -193,6 +218,8 @@ class QwenImagePipeline(BasePipeline):
             step_kwargs = {k: v for k, v in inputs_shared.items() if k not in ["latents", "sub_latents"]}
             inputs_shared["latents"] = self.step(self.scheduler, latents=inputs_shared["latents"], progress_id=progress_id, noise_pred=noise_pred, **step_kwargs)
             inputs_shared["sub_latents"] = self.step(self.scheduler, latents=inputs_shared["sub_latents"], progress_id=progress_id, noise_pred=sub_noise_pred, **step_kwargs)
+
+            ATTN_CAPTURE_CONFIG["step_counter"] += 1
 
             if inputs_shared.get("processed_inpaint_mask") is not None and inputs_shared.get("edit_latents") is not None:
                 mask = inputs_shared["processed_inpaint_mask"].to(device=self.device, dtype=self.torch_dtype)
@@ -763,6 +790,43 @@ def model_fn_qwen_image(
         img_shapes += [(e.shape[0], e.shape[2]//2, e.shape[3]//2) for e in edit_latents_list]
         edit_image = [rearrange(e, "B C (H P) (W Q) -> B (H W) (C P Q)", H=e.shape[2]//2, W=e.shape[3]//2, P=2, Q=2) for e in edit_latents_list]
         image = torch.cat([image] + edit_image, dim=1)
+
+    # --- Capture Segments Info ---
+    if ATTN_CAPTURE_CONFIG["enable"]:
+        current_len = 0
+        segments = {}
+        
+        # Main
+        main_h, main_w = height//16, width//16
+        main_len = main_h * main_w
+        segments["main"] = {"start": current_len, "end": current_len + main_len, "h": main_h, "w": main_w}
+        current_len += main_len
+        
+        # Sub
+        if sub is not None:
+            # h_s, w_s are defined in the sub block above
+            sub_len = h_s * w_s
+            segments["sub"] = {"start": current_len, "end": current_len + sub_len, "h": h_s, "w": w_s}
+            current_len += sub_len
+            
+        # Context
+        if context_latents is not None:
+            ctx_h, ctx_w = context_latents.shape[2]//2, context_latents.shape[3]//2
+            ctx_len = ctx_h * ctx_w
+            segments["context"] = {"start": current_len, "end": current_len + ctx_len, "h": ctx_h, "w": ctx_w}
+            current_len += ctx_len
+            
+        # Edit
+        if edit_latents is not None:
+            edit_latents_list = edit_latents if isinstance(edit_latents, list) else [edit_latents]
+            for i, e in enumerate(edit_latents_list):
+                ed_h, ed_w = e.shape[2]//2, e.shape[3]//2
+                ed_len = ed_h * ed_w
+                segments[f"edit_{i}"] = {"start": current_len, "end": current_len + ed_len, "h": ed_h, "w": ed_w}
+                current_len += ed_len
+        
+        ATTN_CAPTURE_CONFIG["image_segments"] = segments
+    # -----------------------------
 
     image = dit.img_in(image)
     if zero_cond_t:
